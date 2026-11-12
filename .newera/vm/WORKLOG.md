@@ -9,3 +9,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T10:23:57.014Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && for i in $(seq 1 30); do if ! pgrep -f 'npm install --no-audit
 - [2026-11-12T10:25:12.433Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 600 npx vitest run test/client-ip.
 - [2026-11-12T10:25:23.447Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 900 npx vitest run test/client-ip.
+- [2026-11-12T10:29:11.086Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && npm ls vitest @vitest/pretty-format 2>&1 | head -20; echo ---;
