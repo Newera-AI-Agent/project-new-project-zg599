@@ -59,3 +59,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T13:48:14.381Z | VM 2/3] PLAN updated: 32 steps
 - [2026-11-12T13:51:52.659Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && ls -la .newera && find .newera -maxdepth 3 -type f | head -50 && echo '=== package.j
 - [2026-11-12T13:53:03.398Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== vitest.config.ts ===' && cat vitest.config.ts && echo '=== package.json ==
+- [2026-11-12T14:32:26.833Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== scripts/verify.sh =====' && cat scripts/verify.sh 2>/dev/null && echo '=
