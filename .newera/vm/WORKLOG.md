@@ -42,3 +42,6 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T12:44:31.988Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== root vitest.config.ts ==='; cat vitest.config.ts; echo '=== root package.j
 - [2026-11-12T12:47:43.197Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && timeout 240 npx --yes @cloudflare/vitest-pool-workers --version 2>/dev/null | head -
 - [2026-11-12T12:48:49.488Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p scripts poc/ns0 && cat > poc/ns0/d1hello.test.ts <<'EOF' import { env } fro
+
+- [2026-11-12T12:50:58Z] VM2: wrote BRIEF.md (methodology + PoC recipe + dedupe rule); staged-runner scripts/run-poc.sh verified against real upstream D1 (1 test passed).
+- [2026-11-12T12:50:58.520Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > BRIEF.md <<'EOF' # RED-TEAM BRIEF — pollinations (authorized, local-only) ## 
