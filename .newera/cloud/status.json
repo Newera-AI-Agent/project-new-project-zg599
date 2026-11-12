@@ -4,10 +4,10 @@
   "relayIndex": 0,
   "maxMinutes": 240,
   "state": "running",
-  "step": 107,
-  "minutesLeft": 80,
+  "step": 108,
+  "minutesLeft": 78,
   "todoOpen": 32,
-  "updatedAt": "2026-11-12T12:30:37.338Z",
+  "updatedAt": "2026-11-12T12:32:37.338Z",
   "byok": {
     "active": false,
     "source": "admin",
