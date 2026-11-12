@@ -1,0 +1,1047 @@
+===== shared/client-ip.ts =====
+     1	import type { Context } from "hono";
+     2	
+     3	/** The visitor IP that Cloudflare saw. Clients cannot set CF-Connecting-IP. */
+     4	export function getRealClientIp(c: Context): string {
+     5	    return c.req.header("cf-connecting-ip") || "unknown";
+     6	}
+     7	
+     8	/** Lowercase, zero-padded hex encoding of a byte buffer. */
+     9	export function bytesToHex(bytes: ArrayBuffer): string {
+    10	    return Array.from(new Uint8Array(bytes))
+    11	        .map((byte) => byte.toString(16).padStart(2, "0"))
+    12	        .join("");
+    13	}
+    14	
+    15	/** Salted SHA-256 hash of the full IP — irreversible without the salt. */
+    16	export async function hashIp(
+    17	    ip: string | undefined,
+    18	    salt: string,
+    19	): Promise<string | undefined> {
+    20	    if (!ip) return undefined;
+    21	    const data = new TextEncoder().encode(`${salt}:${ip}`);
+    22	    return bytesToHex(await crypto.subtle.digest("SHA-256", data));
+    23	}
+    24	
+    25	/** Strip `::ffff:` prefix from IPv4-mapped IPv6 addresses. */
+    26	export function stripIPv4MappedPrefix(ip: string): string {
+    27	    const match = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    28	    return match ? match[1] : ip;
+    29	}
+    30	
+    31	/** Expand IPv6 `::` shorthand to full 8-group form. */
+    32	function expandIPv6(ip: string): string {
+    33	    if (!ip.includes("::")) {
+    34	        return ip
+    35	            .split(":")
+    36	            .map((group) => group.padStart(4, "0"))
+    37	            .join(":");
+    38	    }
+    39	    const halves = ip.split("::");
+    40	    const left = halves[0] ? halves[0].split(":") : [];
+    41	    const right = halves[1] ? halves[1].split(":") : [];
+    42	    const middle = Array(8 - left.length - right.length).fill("0000");
+    43	    return [...left, ...middle, ...right]
+    44	        .map((group) => group.padStart(4, "0"))
+    45	        .join(":");
+    46	}
+    47	
+    48	/** Truncate IP to /24 subnet (IPv4) or /48 subnet (IPv6, first 3 groups). */
+    49	export function truncateIpToSubnet(ip: string | undefined): string | undefined {
+    50	    if (!ip) return undefined;
+    51	    const normalized = stripIPv4MappedPrefix(ip);
+    52	    if (normalized.includes(".")) {
+    53	        const parts = normalized.split(".");
+    54	        if (parts.length === 4) return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+    55	    }
+    56	    if (normalized.includes(":")) {
+    57	        const groups = expandIPv6(normalized).split(":");
+    58	        return `${groups[0]}:${groups[1]}:${groups[2]}::`;
+    59	    }
+    60	    return undefined;
+    61	}
+===== shared/cache.ts =====
+     1	import type { Logger } from "@logtape/logtape";
+     2	
+     3	interface CacheOptions<TArgs extends unknown[]> {
+     4	    log: Logger;
+     5	    ttl: number;
+     6	    kv: KVNamespace;
+     7	    keyGenerator: (...args: TArgs) => string | Promise<string>;
+     8	}
+     9	
+    10	interface CacheEntry<T> {
+    11	    value: T;
+    12	    ttl: number;
+    13	}
+    14	
+    15	/**
+    16	 * Creates a cached version of an async function using Cloudflare KV
+    17	 * @param fn The async function to cache
+    18	 * @param options Cache configuration options
+    19	 * @returns A cached version of the function
+    20	 */
+    21	export function cached<TArgs extends unknown[], TReturn>(
+    22	    fn: (...args: TArgs) => Promise<TReturn>,
+    23	    options: CacheOptions<TArgs>,
+    24	): (...args: TArgs) => Promise<TReturn> {
+    25	    const { ttl, kv, keyGenerator, log } = options;
+    26	
+    27	    return async (...args: TArgs): Promise<TReturn> => {
+    28	        const cacheKey = await keyGenerator(...args);
+    29	
+    30	        try {
+    31	            log.trace("Fetching from cache: {key}", { key: cacheKey });
+    32	            const cachedData = (await kv.get(
+    33	                cacheKey,
+    34	                "json",
+    35	            )) as CacheEntry<TReturn> | null;
+    36	            if (cachedData) {
+    37	                const ttlChanged = cachedData.ttl !== ttl;
+    38	                if (!ttlChanged) {
+    39	                    return cachedData.value;
+    40	                }
+    41	            }
+    42	        } catch (error) {
+    43	            log.warn("Failed to read from cache: {error}", { error });
+    44	        }
+    45	
+    46	        log.trace("Executing function: {key}", { key: cacheKey });
+    47	        const result = await fn(...args);
+    48	
+    49	        try {
+    50	            log.trace("Writing to cache: {key}", { key: cacheKey });
+    51	            const cacheEntry: CacheEntry<TReturn> = {
+    52	                value: result,
+    53	                ttl,
+    54	            };
+    55	            await kv.put(cacheKey, JSON.stringify(cacheEntry), {
+    56	                expirationTtl: ttl,
+    57	            });
+    58	        } catch (error) {
+    59	            log.warn("Failed to write to cache: {error}", { error });
+    60	        }
+    61	
+    62	        return result;
+    63	    };
+    64	}
+===== shared/rate-limit.ts =====
+     1	import type { Context } from "hono";
+     2	import { createMiddleware } from "hono/factory";
+     3	import { HTTPException } from "hono/http-exception";
+     4	import { extractApiKey } from "./auth/api-key.ts";
+     5	import { bytesToHex, getRealClientIp } from "./client-ip.ts";
+     6	
+     7	type RateLimitEnv = {
+     8	    Bindings: {
+     9	        EDGE_RATE_LIMITER?: RateLimit;
+    10	        EDGE_IP_RATE_LIMITER?: RateLimit;
+    11	    };
+    12	};
+    13	
+    14	/**
+    15	 * Cloudflare-native limit that runs before auth, so one flooding key is
+    16	 * rejected without reaching D1. Counts per API key, hashed so no lookup is
+    17	 * needed. With `byIp`, requests without a key count per client IP instead,
+    18	 * and keyed requests also count per IP in `EDGE_IP_RATE_LIMITER`, so
+    19	 * rotating made-up keys from one IP cannot dodge the limit. Each Worker's
+    20	 * wrangler.toml sets its limits per 10 seconds, matching `Retry-After`.
+    21	 * Enter leaves `byIp` off because gen's internal calls arrive without a
+    22	 * client IP; it still counts every request that carries a client IP, keyed
+    23	 * or not, so public routes such as device codes, app lookup and sign-in
+    24	 * cannot be flooded into D1 with made-up keys. Cloudflare counts per
+    25	 * location, so this caps floods rather than enforcing an exact quota.
+    26	 */
+    27	export function rateLimit({ byIp }: { byIp: boolean }) {
+    28	    return createMiddleware<RateLimitEnv>(async (c, next) => {
+    29	        const apiKey = extractApiKey(c.req.raw);
+    30	        const ip = `ip:${getRealClientIp(c)}`;
+    31	        if (apiKey) {
+    32	            const digest = await crypto.subtle.digest(
+    33	                "SHA-256",
+    34	                new TextEncoder().encode(apiKey),
+    35	            );
+    36	            await limit(
+    37	                c,
+    38	                c.env.EDGE_RATE_LIMITER,
+    39	                `key:${bytesToHex(digest)}`,
+    40	            );
+    41	            if (byIp) await limit(c, c.env.EDGE_IP_RATE_LIMITER, ip);
+    42	        } else if (byIp) {
+    43	            await limit(c, c.env.EDGE_RATE_LIMITER, ip);
+    44	        }
+    45	        if (!byIp && c.req.header("cf-connecting-ip")) {
+    46	            await limit(c, c.env.EDGE_RATE_LIMITER, ip);
+    47	        }
+    48	        await next();
+    49	    });
+    50	}
+    51	
+    52	/** A 429 once `key` is over `limiter`; `retryAfter` is its period in seconds. */
+    53	export async function limit(
+    54	    c: Context,
+    55	    limiter: RateLimit | undefined,
+    56	    key: string,
+    57	    retryAfter = 10,
+    58	) {
+    59	    if (limiter && !(await limiter.limit({ key })).success) {
+    60	        c.header("Retry-After", String(retryAfter));
+    61	        throw new HTTPException(429, {
+    62	            message: "Too many requests. Please slow down.",
+    63	        });
+    64	    }
+    65	}
+===== shared/auth/redirect-uri.ts =====
+     1	/**
+     2	 * Match an incoming `redirect_uri` against a registered allowlist for a `pk_`.
+     3	 *
+     4	 * Scheme policy (https-only except loopback http) is enforced at registration
+     5	 * time (see validateRedirectUriFormat). Matching trusts the stored allowlist
+     6	 * and does not re-check the scheme.
+     7	 *
+     8	 * Comparison rules:
+     9	 * - Scheme + hostname + path are matched exactly (after lowercasing host).
+    10	 * - Trailing slash on the path is insignificant: `/cb` and `/cb/` match.
+    11	 * - Query strings are ignored when the registered URI has no query: apps
+    12	 *   round-trip state (e.g. `?prompt=...`) and the auth code/token rides the URL
+    13	 *   fragment, not the query. If the registered URI includes a query, it must
+    14	 *   match exactly so existing query-bound allowlist entries are not broadened.
+    15	 * - For loopback entries (RFC 8252 §7.3): port is ignored — any port matches.
+    16	 *   This covers native/CLI apps that bind to ephemeral ports each run.
+    17	 * - For non-loopback entries: port must match (default ports normalized).
+    18	 * - Fragments are rejected; redirect URIs must not contain them.
+    19	 *
+    20	 * Returns false on any parse error or empty allowlist.
+    21	 *
+    22	 * Single source of truth for both /api/app-lookup (consent screen attribution)
+    23	 * and createApiKeyForUser (sk_ minting). Keep them aligned.
+    24	 */
+    25	export function redirectUriMatchesAllowlist(
+    26	    uri: string,
+    27	    allowlist: readonly string[] | null | undefined,
+    28	): boolean {
+    29	    if (!allowlist?.length) return false;
+    30	    const incoming = safeParse(uri);
+    31	    if (!incoming) return false;
+    32	    return allowlist.some((entry) => matchesEntry(incoming, entry));
+    33	}
+    34	
+    35	/**
+    36	 * Strict variant for the OAuth authorization-code flow (RFC 6749 §3.1.2.3):
+    37	 * the authorization code rides the redirect query string, so the fragment-era
+    38	 * leniency of accepting extra query params must not apply. The query must
+    39	 * equal the registered entry's exactly (normally: both absent). Loopback
+    40	 * ports stay port-agnostic (RFC 8252 §7.3) and one trailing slash is still
+    41	 * ignored. The legacy fragment flow keeps the lenient matcher above.
+    42	 */
+    43	export function redirectUriMatchesAllowlistExact(
+    44	    uri: string,
+    45	    allowlist: readonly string[] | null | undefined,
+    46	): boolean {
+    47	    if (!allowlist?.length) return false;
+    48	    const incoming = safeParse(uri);
+    49	    if (!incoming) return false;
+    50	    return allowlist.some((entry) => matchesEntry(incoming, entry, true));
+    51	}
+    52	
+    53	// Schemes the browser handles itself. Sending the consent page to one would
+    54	// load or run it on this page instead of handing the result back to an app.
+    55	const BROWSER_SCHEMES = new Set([
+    56	    "javascript:",
+    57	    "data:",
+    58	    "vbscript:",
+    59	    "file:",
+    60	    "blob:",
+    61	    "about:",
+    62	    "filesystem:",
+    63	]);
+    64	
+    65	/**
+    66	 * Parse the redirect target of the consent screen: a website, a loopback
+    67	 * server or a native app's own scheme (e.g. `myapp://callback`). Null when the
+    68	 * URL is unparseable or uses a scheme the browser handles itself, so such a
+    69	 * target never reaches window.location. The URL parser normalizes the scheme,
+    70	 * and callers navigate to the parsed URL, so case or whitespace tricks in the
+    71	 * raw string cannot slip past the check.
+    72	 */
+    73	export function parseAuthorizeRedirectUrl(url: string): URL | null {
+    74	    const parsed = safeParse(url);
+    75	    return parsed && !BROWSER_SCHEMES.has(parsed.protocol) ? parsed : null;
+    76	}
+    77	
+    78	export function isAllowedRedirectUrl(url: URL): boolean {
+    79	    if (url.protocol === "https:") return true;
+    80	    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+    81	}
+    82	
+    83	export function isLoopbackHostname(hostname: string): boolean {
+    84	    const h = normalizeHostname(hostname);
+    85	    if (h === "localhost" || h === "0.0.0.0" || h === "::1") return true;
+    86	    if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+    87	    return false;
+    88	}
+    89	
+    90	function safeParse(url: string): URL | null {
+    91	    try {
+    92	        return new URL(url);
+    93	    } catch {
+    94	        return null;
+    95	    }
+    96	}
+    97	
+    98	function normalizeHostname(hostname: string): string {
+    99	    return hostname
+   100	        .toLowerCase()
+   101	        .replace(/^\[(.*)\]$/, "$1")
+   102	        .replace(/\.$/, "");
+   103	}
+   104	
+   105	function normalizePathname(pathname: string): string {
+   106	    return pathname.length > 1 && pathname.endsWith("/")
+   107	        ? pathname.slice(0, -1)
+   108	        : pathname;
+   109	}
+   110	
+   111	function matchesEntry(
+   112	    incoming: URL,
+   113	    entryUrl: string,
+   114	    exactQuery = false,
+   115	): boolean {
+   116	    const entry = safeParse(entryUrl);
+   117	    if (!entry) return false;
+   118	    if (incoming.hash || entry.hash) return false;
+   119	    if (incoming.protocol !== entry.protocol) return false;
+   120	    if (
+   121	        normalizeHostname(incoming.hostname) !==
+   122	        normalizeHostname(entry.hostname)
+   123	    ) {
+   124	        return false;
+   125	    }
+   126	    if (
+   127	        normalizePathname(incoming.pathname) !==
+   128	        normalizePathname(entry.pathname)
+   129	    ) {
+   130	        return false;
+   131	    }
+   132	    if (exactQuery) {
+   133	        if (incoming.search !== entry.search) return false;
+   134	    } else if (entry.search && incoming.search !== entry.search) {
+   135	        return false;
+   136	    }
+   137	    if (isLoopbackHostname(entry.hostname)) return true;
+   138	    return incoming.port === entry.port;
+   139	}
+===== shared/community-endpoint-urls.ts =====
+     1	export function validateCommunityEndpointUrl(value: string): string {
+     2	    if (value !== value.trim()) {
+     3	        throw new Error("Endpoint URL cannot include surrounding whitespace");
+     4	    }
+     5	    const url = new URL(value);
+     6	    if (url.protocol !== "https:") {
+     7	        throw new Error("Endpoint URL must use https");
+     8	    }
+     9	    if (url.username || url.password) {
+    10	        throw new Error("Endpoint URL cannot include credentials");
+    11	    }
+    12	    if (isBlockedHostname(url.hostname)) {
+    13	        throw new Error("Endpoint URL cannot target a private host");
+    14	    }
+    15	    if (url.hash) {
+    16	        throw new Error("Endpoint URL cannot include a fragment");
+    17	    }
+    18	    return value;
+    19	}
+    20	
+    21	export function normalizeCommunityAssetUrl(
+    22	    value: string,
+    23	    endpointBaseUrl: string,
+    24	): string {
+    25	    const url = new URL(value);
+    26	    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    27	        throw new Error("Image URL must use http or https");
+    28	    }
+    29	    if (url.username || url.password || isBlockedHostname(url.hostname)) {
+    30	        throw new Error("Image URL cannot target a private host");
+    31	    }
+    32	    if (
+    33	        url.protocol === "http:" &&
+    34	        url.hostname !== new URL(endpointBaseUrl).hostname
+    35	    ) {
+    36	        throw new Error("HTTP image URL must use the endpoint host");
+    37	    }
+    38	    url.hash = "";
+    39	    return url.toString();
+    40	}
+    41	
+    42	export function communityChatCompletionsUrl(baseUrl: string): string {
+    43	    return communityOpenAIEndpointUrl(baseUrl, "/chat/completions");
+    44	}
+    45	
+    46	export function communityResponsesUrl(baseUrl: string): string {
+    47	    return communityOpenAIEndpointUrl(baseUrl, "/responses");
+    48	}
+    49	
+    50	export function communityImageGenerationsUrl(baseUrl: string): string {
+    51	    return communityOpenAIEndpointUrl(baseUrl, "/images/generations");
+    52	}
+    53	
+    54	export function communityImageEditsUrl(baseUrl: string): string {
+    55	    return communityOpenAIEndpointUrl(baseUrl, "/images/edits");
+    56	}
+    57	
+    58	export function communityAudioTranscriptionsUrl(baseUrl: string): string {
+    59	    return communityOpenAIEndpointUrl(baseUrl, "/audio/transcriptions");
+    60	}
+    61	
+    62	export function communityAudioSpeechUrl(baseUrl: string): string {
+    63	    return communityOpenAIEndpointUrl(baseUrl, "/audio/speech");
+    64	}
+    65	
+    66	export function communityEmbeddingsUrl(baseUrl: string): string {
+    67	    return communityOpenAIEndpointUrl(baseUrl, "/embeddings");
+    68	}
+    69	
+    70	export function communityOpenAIBaseUrl(baseUrl: string): string {
+    71	    const validated = validateCommunityEndpointUrl(baseUrl);
+    72	    const url = new URL(validated);
+    73	    const suffix = configuredCommunityEndpointSuffix(url);
+    74	    if (!suffix) return validated;
+    75	    const pathname = url.pathname.replace(/\/+$/, "");
+    76	    url.pathname = pathname.slice(0, -suffix.length);
+    77	    return url.toString();
+    78	}
+    79	
+    80	const COMMUNITY_OPENAI_ENDPOINT_SUFFIXES = [
+    81	    "/chat/completions",
+    82	    "/images/generations",
+    83	    "/images/edits",
+    84	    "/audio/transcriptions",
+    85	    "/audio/speech",
+    86	    "/embeddings",
+    87	    "/responses",
+    88	] as const;
+    89	
+    90	function configuredCommunityEndpointSuffix(url: URL): string | undefined {
+    91	    const pathname = url.pathname.replace(/\/+$/, "");
+    92	    return COMMUNITY_OPENAI_ENDPOINT_SUFFIXES.find((suffix) =>
+    93	        pathname.endsWith(suffix),
+    94	    );
+    95	}
+    96	
+    97	function communityOpenAIEndpointUrl(baseUrl: string, suffix: string): string {
+    98	    const validated = validateCommunityEndpointUrl(baseUrl);
+    99	    if (configuredCommunityEndpointSuffix(new URL(validated)) === suffix) {
+   100	        return validated;
+   101	    }
+   102	    const url = new URL(communityOpenAIBaseUrl(validated));
+   103	    url.pathname = `${url.pathname.replace(/\/+$/, "")}${suffix}`;
+   104	    return url.toString();
+   105	}
+   106	
+   107	export function isBlockedHostname(hostname: string): boolean {
+   108	    const host = hostname
+   109	        .replace(/^\[|\]$/g, "")
+   110	        .replace(/\.$/, "")
+   111	        .toLowerCase();
+   112	    if (host === "localhost" || host.endsWith(".localhost")) return true;
+   113	    if (host.endsWith(".local")) return true;
+   114	    if (host.includes(":")) return true;
+   115	    if (host.startsWith("127.") || host.startsWith("10.")) return true;
+   116	    if (host.startsWith("169.254.")) return true;
+   117	    if (host.startsWith("100.")) {
+   118	        const second = Number(host.split(".")[1]);
+   119	        if (second >= 64 && second <= 127) return true;
+   120	    }
+   121	    if (host.startsWith("192.168.")) return true;
+   122	    const ipv4 = host.split(".").map(Number);
+   123	    if (
+   124	        ipv4.length === 4 &&
+   125	        ipv4.every(
+   126	            (part) => Number.isInteger(part) && part >= 0 && part <= 255,
+   127	        ) &&
+   128	        (ipv4[0] === 0 ||
+   129	            (ipv4[0] ?? 0) >= 224 ||
+   130	            (ipv4[0] === 198 && (ipv4[1] === 18 || ipv4[1] === 19)))
+   131	    ) {
+   132	        return true;
+   133	    }
+   134	    const match172 = host.match(/^172\.(\d+)\./);
+   135	    if (match172) {
+   136	        const second = Number(match172[1]);
+   137	        if (second >= 16 && second <= 31) return true;
+   138	    }
+   139	    return false;
+   140	}
+===== shared/secret-encryption.ts =====
+     1	const VERSION = "v1";
+     2	
+     3	export async function encryptSecret(
+     4	    plaintext: string,
+     5	    secret: string,
+     6	): Promise<string> {
+     7	    const iv = crypto.getRandomValues(new Uint8Array(12));
+     8	    const key = await deriveKey(secret);
+     9	    const ciphertext = new Uint8Array(
+    10	        await crypto.subtle.encrypt(
+    11	            { name: "AES-GCM", iv },
+    12	            key,
+    13	            new TextEncoder().encode(plaintext),
+    14	        ),
+    15	    );
+    16	    return `${VERSION}:${bytesToBase64(iv)}:${bytesToBase64(ciphertext)}`;
+    17	}
+    18	
+    19	export async function decryptSecret(
+    20	    encrypted: string,
+    21	    secret: string,
+    22	): Promise<string> {
+    23	    const [version, ivBase64, ciphertextBase64] = encrypted.split(":");
+    24	    if (version !== VERSION || !ivBase64 || !ciphertextBase64) {
+    25	        throw new Error("Unsupported encrypted secret format");
+    26	    }
+    27	    const key = await deriveKey(secret);
+    28	    const plaintext = await crypto.subtle.decrypt(
+    29	        { name: "AES-GCM", iv: base64ToBytes(ivBase64) },
+    30	        key,
+    31	        base64ToBytes(ciphertextBase64),
+    32	    );
+    33	    return new TextDecoder().decode(plaintext);
+    34	}
+    35	
+    36	async function deriveKey(secret: string): Promise<CryptoKey> {
+    37	    const digest = await crypto.subtle.digest(
+    38	        "SHA-256",
+    39	        new TextEncoder().encode(secret),
+    40	    );
+    41	    return crypto.subtle.importKey("raw", digest, "AES-GCM", false, [
+    42	        "encrypt",
+    43	        "decrypt",
+    44	    ]);
+    45	}
+    46	
+    47	function bytesToBase64(bytes: Uint8Array): string {
+    48	    let binary = "";
+    49	    for (const byte of bytes) binary += String.fromCharCode(byte);
+    50	    return btoa(binary);
+    51	}
+    52	
+    53	function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
+    54	    const binary = atob(value);
+    55	    const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+    56	    for (let i = 0; i < binary.length; i += 1) {
+    57	        bytes[i] = binary.charCodeAt(i);
+    58	    }
+    59	    return bytes;
+    60	}
+===== shared/billing/deduction.ts =====
+     1	import { sql } from "drizzle-orm";
+     2	import type { DrizzleD1Database } from "drizzle-orm/d1";
+     3	import { apikey as apiKeyTable, user as userTable } from "../db/better-auth.ts";
+     4	import type { BalanceBucket, UserBalance } from "./bucket-selection.ts";
+     5	import { POLLEN_BILLING_PRECISION } from "./precision.ts";
+     6	
+     7	export type Bucket = BalanceBucket;
+     8	
+     9	const BUCKET_COLUMNS = {
+    10	    tier: userTable.tierBalance,
+    11	    pack: userTable.packBalance,
+    12	} as const satisfies Record<Bucket, unknown>;
+    13	
+    14	/**
+    15	 * Atomically deducts pollen from user balance.
+    16	 *
+    17	 * This is the authoritative deduction ladder — the one place a positive charge
+    18	 * picks a bucket and money actually moves, read top-to-bottom as the `decision`
+    19	 * CASE below. `canCoverEstimatedCharge` answers the separate preflight question
+    20	 * of whether an estimate is affordable, while `createBalanceCheckResult` only
+    21	 * labels a meter for reporting. Neither is an authoritative write-path rule.
+    22	 *
+    23	 *   1. paid-only  → `pack` only (never Quest Pollen)
+    24	 *   2. quest-only → `tier` only, for keys that never spend paid Pollen
+    25	 *   3. restricted → `pack`, including debt for requests already admitted
+    26	 *   4. tier       → Quest Pollen when it covers the full amount (`>=`)
+    27	 *   5. pack       → any positive paid balance when Quest Pollen can't cover
+    28	 *   6. tier       → fall back to Quest Pollen when pack is non-positive
+    29	 *
+    30	 * The final `tier` fall-through is load-bearing: when Quest Pollen cannot cover
+    31	 * the charge and paid balance is non-positive, the charge accrues Quest-Pollen
+    32	 * debt instead of reducing paid balance further. Non-positive amounts return
+    33	 * without selecting a bucket or writing.
+    34	 * Restrictions reject new Quest-only requests at preflight. Those already in
+    35	 * flight still settle in their permitted bucket; completed work is never free.
+    36	 */
+    37	export async function atomicDeductUserBalance(
+    38	    db: DrizzleD1Database,
+    39	    userId: string,
+    40	    amount: number,
+    41	    isPaidOnly = false,
+    42	    questPollenOnly = false,
+    43	): Promise<{
+    44	    ok: boolean;
+    45	    bucket: Bucket | null;
+    46	    packBalance: number | null;
+    47	    lastPackPollen: number | null;
+    48	    postDeductionBalance: number | null;
+    49	}> {
+    50	    if (amount <= 0) {
+    51	        return {
+    52	            ok: true,
+    53	            bucket: null,
+    54	            packBalance: null,
+    55	            lastPackPollen: null,
+    56	            postDeductionBalance: null,
+    57	        };
+    58	    }
+    59	
+    60	    const row = await db.get<{
+    61	        bucket: Bucket;
+    62	        tierBalance: number | null;
+    63	        packBalance: number | null;
+    64	        lastPackPollen: number | null;
+    65	    }>(
+    66	        sql`
+    67	        WITH decision AS MATERIALIZED (
+    68	            SELECT
+    69	                id,
+    70	                CASE
+    71	                    WHEN ${isPaidOnly ? 1 : 0} = 1 THEN 'pack'
+    72	                    WHEN ${questPollenOnly ? 1 : 0} = 1 THEN 'tier'
+    73	                    WHEN quest_pollen_restricted = 1 THEN 'pack'
+    74	                    WHEN COALESCE(tier_balance, 0) >= ${amount} THEN 'tier'
+    75	                    WHEN COALESCE(pack_balance, 0) > 0 THEN 'pack'
+    76	                    ELSE 'tier'
+    77	                END AS bucket
+    78	            FROM ${userTable}
+    79	            WHERE id = ${userId}
+    80	        )
+    81	        UPDATE ${userTable}
+    82	        SET
+    83	            tier_balance = CASE
+    84	                WHEN (SELECT bucket FROM decision) = 'tier'
+    85	                    THEN ROUND(COALESCE(tier_balance, 0) - ${amount}, ${POLLEN_BILLING_PRECISION})
+    86	                ELSE tier_balance
+    87	            END,
+    88	            pack_balance = CASE
+    89	                WHEN (SELECT bucket FROM decision) = 'pack'
+    90	                    THEN ROUND(COALESCE(pack_balance, 0) - ${amount}, ${POLLEN_BILLING_PRECISION})
+    91	                ELSE pack_balance
+    92	            END
+    93	        WHERE id = (SELECT id FROM decision)
+    94	        RETURNING
+    95	            (SELECT bucket FROM decision) AS bucket,
+    96	            tier_balance AS tierBalance,
+    97	            pack_balance AS packBalance,
+    98	            last_pack_pollen AS lastPackPollen
+    99	    `,
+   100	    );
+   101	
+   102	    return {
+   103	        ok: !!row,
+   104	        bucket: row?.bucket ?? null,
+   105	        packBalance: row?.packBalance ?? null,
+   106	        lastPackPollen: row?.lastPackPollen ?? null,
+   107	        postDeductionBalance: row
+   108	            ? row.bucket === "tier"
+   109	                ? row.tierBalance
+   110	                : row.packBalance
+   111	            : null,
+   112	    };
+   113	}
+   114	
+   115	/** Reserve an estimated charge from a finite API-key budget. */
+   116	export async function atomicReserveApiKeyBalance(
+   117	    db: DrizzleD1Database,
+   118	    apiKeyId: string,
+   119	    amount: number,
+   120	): Promise<{ ok: boolean; reserved: number }> {
+   121	    if (amount <= 0) return { ok: true, reserved: 0 };
+   122	
+   123	    const result = await db.run(sql`
+   124				UPDATE ${apiKeyTable}
+   125				SET pollen_balance = ROUND(pollen_balance - ${amount}, ${POLLEN_BILLING_PRECISION})
+   126				WHERE id = ${apiKeyId}
+   127				AND pollen_balance IS NOT NULL
+   128				AND pollen_balance >= ${amount}
+   129			`);
+   130	
+   131	    const ok = (result.meta.changes ?? 0) > 0;
+   132	    return { ok, reserved: ok ? amount : 0 };
+   133	}
+   134	
+   135	/**
+   136	 * Reconcile a finite API-key budget with the final charge. Positive amounts
+   137	 * deduct more; negative amounts release unused reservation.
+   138	 */
+   139	export async function atomicAdjustApiKeyBalance(
+   140	    db: DrizzleD1Database,
+   141	    apiKeyId: string,
+   142	    amount: number,
+   143	): Promise<{ ok: boolean }> {
+   144	    if (amount === 0) return { ok: true };
+   145	
+   146	    const result = await db.run(sql`
+   147				UPDATE ${apiKeyTable}
+   148				SET pollen_balance = ROUND(pollen_balance - ${amount}, ${POLLEN_BILLING_PRECISION})
+   149				WHERE id = ${apiKeyId}
+   150				AND pollen_balance IS NOT NULL
+   151			`);
+   152	
+   153	    return { ok: (result.meta.changes ?? 0) > 0 };
+   154	}
+   155	
+   156	export type { UserBalance };
+   157	
+   158	/**
+   159	 * Atomically credits a positive amount to a user balance bucket.
+   160	 */
+   161	export async function atomicCreditUserBalance(
+   162	    db: DrizzleD1Database,
+   163	    userId: string,
+   164	    bucket: Bucket,
+   165	    amount: number,
+   166	): Promise<{ ok: boolean; newBalance: number | null }> {
+   167	    if (amount <= 0) return { ok: true, newBalance: null };
+   168	
+   169	    const column = BUCKET_COLUMNS[bucket];
+   170	    const rows = await db
+   171	        .update(userTable)
+   172	        .set({
+   173	            [`${bucket}Balance`]: sql`ROUND(COALESCE(${column}, 0) + ${amount}, ${POLLEN_BILLING_PRECISION})`,
+   174	        })
+   175	        .where(sql`${userTable.id} = ${userId}`)
+   176	        .returning({ newBalance: column });
+   177	
+   178	    return {
+   179	        ok: rows.length > 0,
+   180	        newBalance: rows[0]?.newBalance ?? null,
+   181	    };
+   182	}
+===== shared/billing/balance.ts =====
+     1	import { eq } from "drizzle-orm";
+     2	import type { DrizzleD1Database } from "drizzle-orm/d1";
+     3	import { user as userTable } from "../db/better-auth.ts";
+     4	import type { BalanceBucket, UserBalance } from "./bucket-selection.ts";
+     5	
+     6	export type { UserBalance } from "./bucket-selection.ts";
+     7	
+     8	export type BalanceCheckResult = {
+     9	    selectedMeterId: string;
+    10	    selectedMeterSlug: string;
+    11	    balances: Record<string, number>;
+    12	};
+    13	
+    14	export async function getUserBalance(
+    15	    db: DrizzleD1Database,
+    16	    userId: string,
+    17	): Promise<UserBalance> {
+    18	    const users = await db
+    19	        .select({
+    20	            tierBalance: userTable.tierBalance,
+    21	            packBalance: userTable.packBalance,
+    22	            questPollenRestricted: userTable.questPollenRestricted,
+    23	        })
+    24	        .from(userTable)
+    25	        .where(eq(userTable.id, userId))
+    26	        .limit(1);
+    27	
+    28	    const user = users[0];
+    29	    return {
+    30	        tierBalance: user?.tierBalance ?? 0,
+    31	        packBalance: user?.packBalance ?? 0,
+    32	        ...(user?.questPollenRestricted ? { questPollenRestricted: true } : {}),
+    33	    };
+    34	}
+    35	
+    36	/**
+    37	 * Get the total positive balance across relevant buckets.
+    38	 * For paid-only models: pack only.
+    39	 */
+    40	export function getAvailableBalance(
+    41	    balances: UserBalance,
+    42	    isPaidOnly = false,
+    43	): number {
+    44	    if (isPaidOnly || balances.questPollenRestricted) {
+    45	        return Math.max(0, balances.packBalance);
+    46	    }
+    47	    return (
+    48	        Math.max(0, balances.tierBalance) + Math.max(0, balances.packBalance)
+    49	    );
+    50	}
+    51	
+    52	/**
+    53	 * Map a deduction bucket to its meter id/slug pair. The balances sub-object
+    54	 * differs per call site, so this returns only the id/slug pair.
+    55	 */
+    56	export function payerBucketToMeter(bucket: BalanceBucket): {
+    57	    selectedMeterId: string;
+    58	    selectedMeterSlug: "v1:meter:tier" | "v1:meter:pack";
+    59	} {
+    60	    return {
+    61	        selectedMeterId: `local:${bucket}`,
+    62	        selectedMeterSlug:
+    63	            bucket === "tier" ? "v1:meter:tier" : "v1:meter:pack",
+    64	    };
+    65	}
+    66	
+    67	export function createBalanceCheckResult(
+    68	    balances: UserBalance,
+    69	    isPaidOnly = false,
+    70	): BalanceCheckResult {
+    71	    isPaidOnly ||= balances.questPollenRestricted === true;
+    72	    // Which bucket the charge is expected to land in, for the reported meter.
+    73	    // The authoritative choice is the SQL ladder in atomicDeductUserBalance.
+    74	    const source: BalanceBucket = isPaidOnly
+    75	        ? "pack"
+    76	        : balances.tierBalance > 0
+    77	          ? "tier"
+    78	          : "pack";
+    79	    return {
+    80	        ...payerBucketToMeter(source),
+    81	        balances: {
+    82	            "v1:meter:tier": isPaidOnly ? 0 : balances.tierBalance,
+    83	            "v1:meter:pack": balances.packBalance,
+    84	        },
+    85	    };
+    86	}
+===== shared/billing/bucket-selection.ts =====
+     1	export type UserBalance = {
+     2	    tierBalance: number;
+     3	    packBalance: number;
+     4	    questPollenRestricted?: boolean;
+     5	};
+     6	
+     7	export type BalanceBucket = "tier" | "pack";
+     8	
+     9	/**
+    10	 * Preflight "can the caller afford this estimate" check. This is intentionally
+    11	 * a different question from the authoritative bucket ladder in
+    12	 * `atomicDeductUserBalance`: that function chooses *which* bucket to write to
+    13	 * when money actually moves; this one only asks whether *enough exists* to let
+    14	 * the request proceed before any mutation.
+    15	 *
+    16	 * The two therefore need not use identical thresholds. This preflight clamps
+    17	 * negative estimates to zero, but every request still requires a positive
+    18	 * balance in at least one bucket. The write path skips non-positive charges
+    19	 * entirely; for a positive actual charge, it uses
+    20	 * Quest Pollen when that bucket covers the charge, otherwise any positive paid
+    21	 * balance, and finally Quest Pollen debt when the paid balance is non-positive.
+    22	 */
+    23	export function canCoverEstimatedCharge(
+    24	    balances: UserBalance,
+    25	    estimatedCost: number,
+    26	    isPaidOnly = false,
+    27	): boolean {
+    28	    const tierBalance = balances.questPollenRestricted
+    29	        ? 0
+    30	        : balances.tierBalance;
+    31	    const hasPositiveBalance = tierBalance > 0 || balances.packBalance > 0;
+    32	    if (!hasPositiveBalance) return false;
+    33	
+    34	    const threshold = Math.max(0, estimatedCost);
+    35	    // Paid-only stays strict: the flag means "must hold paid balance", a
+    36	    // positive-balance requirement rather than a cost-coverage one. A paid-only
+    37	    // model is never free, so no zero-balance caller needs to get through.
+    38	    if (isPaidOnly) return balances.packBalance > threshold;
+    39	    // Once the wallet has a positive bucket, compare each bucket to the cost.
+    40	    return tierBalance >= threshold || balances.packBalance >= threshold;
+    41	}
+===== shared/billing/markup.ts =====
+     1	import { parseMetadata } from "../auth/api-key-metadata.ts";
+     2	import { roundPollenLedgerAmount } from "./precision.ts";
+     3	
+     4	/**
+     5	 * BYOP markup applied to requests authenticated by a BYOP-issued sk_ token with
+     6	 * a trusted byop_client_key_id. The payer is billed baseline + markup; the
+     7	 * markup is credited to the app owner's matching Quest Pollen or pack balance.
+     8	 */
+     9	export const MARKUP_PCT = 0.25;
+    10	
+    11	export function computeDevCredit(baselinePrice: number): number {
+    12	    if (baselinePrice <= 0 || MARKUP_PCT <= 0) return 0;
+    13	    return baselinePrice * MARKUP_PCT;
+    14	}
+    15	
+    16	export type ByopClientMarkupFields = {
+    17	    userId?: string | null;
+    18	    prefix?: string | null;
+    19	    enabled?: boolean | null;
+    20	    expiresAt?: Date | string | null;
+    21	    metadata?: string | Record<string, unknown> | null;
+    22	};
+    23	
+    24	/**
+    25	 * Same eligibility `resolveDevMarkup` uses after its D1 lookup. Auth computes
+    26	 * this from the already-joined publishable key so preflight can include markup
+    27	 * without a second query.
+    28	 */
+    29	export function byopClientAllowsMarkup(
+    30	    client: ByopClientMarkupFields | null | undefined,
+    31	    payerUserId: string | undefined,
+    32	): boolean {
+    33	    if (!client?.userId || !payerUserId) return false;
+    34	    if (client.prefix !== "pk") return false;
+    35	    if (client.enabled !== true) return false;
+    36	    if (client.expiresAt && new Date(client.expiresAt) <= new Date()) {
+    37	        return false;
+    38	    }
+    39	    const metadata =
+    40	        typeof client.metadata === "string"
+    41	            ? parseMetadata(client.metadata)
+    42	            : (client.metadata ?? {});
+    43	    if (metadata.earningsEnabled !== true) return false;
+    44	    return client.userId !== payerUserId;
+    45	}
+    46	
+    47	/** Baseline plus BYOP markup, rounded the same way deduction bills. */
+    48	export function withByopMarkup(
+    49	    baselinePrice: number,
+    50	    applies: boolean,
+    51	): number {
+    52	    const baseline = Math.max(0, baselinePrice);
+    53	    if (!applies) return baseline;
+    54	    return roundPollenLedgerAmount(baseline + computeDevCredit(baseline));
+    55	}
+===== shared/http/fix-link.ts =====
+     1	import type { AgentRunClaims } from "../auth/agent-run-token.ts";
+     2	import type { AuthenticatedApiKey } from "../auth/api-key.ts";
+     3	import { PUBLIC_URLS } from "../public-urls.ts";
+     4	
+     5	/**
+     6	 * Refusals the key's owner can fix. Each one links the enter page that fixes
+     7	 * it, and the same link goes into the error message, the JSON `fixUrl` and the
+     8	 * chat reply.
+     9	 */
+    10	export type RefusalContext = {
+    11	    env: {
+    12	        ENVIRONMENT?: string;
+    13	        BETTER_AUTH_SECRET: string;
+    14	        BETTER_AUTH_URL?: string;
+    15	    };
+    16	    var: {
+    17	        auth?: {
+    18	            apiKey?: AuthenticatedApiKey;
+    19	            agentRun?: AgentRunClaims;
+    20	            /** The app to return to after the fix. */
+    21	            appOrigin?: string;
+    22	        };
+    23	    };
+    24	};
+    25	
+    26	export const AUTHENTICATION_REQUIRED_MESSAGE =
+    27	    "A valid API key is required. Get one at https://enter.pollinations.ai/keys, or buy one with USDC (x402) at https://enter.pollinations.ai/api/x402/keys";
+    28	
+    29	/** A link to an enter page on the environment that matches this worker. */
+    30	export function fixLink(
+    31	    c: RefusalContext,
+    32	    path: string,
+    33	    params: Record<string, string | undefined>,
+    34	): string {
+    35	    // Enter links to its own origin; gen picks the enter of its environment.
+    36	    // app.request() tests run without env.
+    37	    const base =
+    38	        c.env?.BETTER_AUTH_URL ??
+    39	        (c.env?.ENVIRONMENT === "staging"
+    40	            ? PUBLIC_URLS.enter.staging
+    41	            : PUBLIC_URLS.enter.production);
+    42	    const url = new URL(path, base);
+    43	    for (const [key, value] of Object.entries({
+    44	        ...params,
+    45	        redirect: c.var.auth?.appOrigin,
+    46	    })) {
+    47	        if (value) url.searchParams.set(key, value);
+    48	    }
+    49	    return url.toString();
+    50	}
+===== shared/public-urls.ts =====
+     1	export const PUBLIC_URL_PROFILES = {
+     2	    pollinations: {
+     3	        root: "https://pollinations.ai",
+     4	        wildcard: "https://*.pollinations.ai",
+     5	        enter: {
+     6	            production: "https://enter.pollinations.ai",
+     7	            staging: "https://staging.enter.pollinations.ai",
+     8	            dev: "https://dev.enter.pollinations.ai",
+     9	        },
+    10	        gen: {
+    11	            production: "https://gen.pollinations.ai",
+    12	            staging: "https://staging.gen.pollinations.ai",
+    13	        },
+    14	    },
+    15	    myceli: {
+    16	        root: "https://myceli.ai",
+    17	        wildcard: "https://*.myceli.ai",
+    18	        enter: {
+    19	            production: "https://enter.myceli.ai",
+    20	            staging: "https://staging.enter.myceli.ai",
+    21	            dev: "https://dev.enter.myceli.ai",
+    22	        },
+    23	        gen: {
+    24	            production: "https://gen.myceli.ai",
+    25	            staging: "https://staging.gen.myceli.ai",
+    26	        },
+    27	    },
+    28	} as const;
+    29	
+    30	export type PublicUrlProfile = keyof typeof PUBLIC_URL_PROFILES;
+    31	
+    32	// Under the proxy plan, the public surface is always *.pollinations.ai.
+    33	// Myceli is the upstream — never reached directly by end users — so absolute
+    34	// URLs baked into Stripe checkout, OAuth redirects, and email links must use
+    35	// the Pollinations profile.
+    36	export const ACTIVE_PUBLIC_URL_PROFILE =
+    37	    "pollinations" satisfies PublicUrlProfile;
+    38	export const PUBLIC_URLS = PUBLIC_URL_PROFILES[ACTIVE_PUBLIC_URL_PROFILE];
+    39	
+    40	export const AUTH_TRUSTED_ORIGINS = Object.values(PUBLIC_URL_PROFILES).flatMap(
+    41	    ({ root, wildcard }) => [root, wildcard],
+    42	);
+===== shared/user-media-url.ts =====
+     1	export type UserMediaUrlValidation =
+     2	    | { ok: true; url: URL }
+     3	    | { ok: false; reason: "invalid" | "protocol" | "private" };
+     4	
+     5	const BLOCKED_HOSTNAMES = /^localhost$/i;
+     6	
+     7	function isBlockedUserMediaHost(hostname: string): boolean {
+     8	    const host = hostname.replace(/^\[|\]$/g, "");
+     9	    const normalized = host.toLowerCase();
+    10	    if (
+    11	        BLOCKED_HOSTNAMES.test(normalized) ||
+    12	        normalized.endsWith(".localhost")
+    13	    ) {
+    14	        return true;
+    15	    }
+    16	
+    17	    if (normalized.includes(":")) return true;
+    18	
+    19	    const parts = normalized.split(".").map(Number);
+    20	    return (
+    21	        parts.length === 4 &&
+    22	        parts.every(
+    23	            (part) => Number.isInteger(part) && part >= 0 && part <= 255,
+    24	        )
+    25	    );
+    26	}
+    27	
+    28	/**
+    29	 * Apply the same URL policy to every user-supplied media fetch: HTTP(S) only,
+    30	 * with credentialed hosts, loopback names, and literal IP addresses refused.
+    31	 */
+    32	export function validateUserMediaUrl(value: string): UserMediaUrlValidation {
+    33	    let url: URL;
+    34	    try {
+    35	        url = new URL(value);
+    36	    } catch {
+    37	        return { ok: false, reason: "invalid" };
+    38	    }
+    39	
+    40	    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    41	        return { ok: false, reason: "protocol" };
+    42	    }
+    43	
+    44	    if (url.username || url.password || isBlockedUserMediaHost(url.hostname)) {
+    45	        return { ok: false, reason: "private" };
+    46	    }
+    47	
+    48	    return { ok: true, url };
+    49	}
