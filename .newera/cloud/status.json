@@ -1,0 +1,24 @@
+{
+  "code": "apzw5zzv3gxv",
+  "jobId": "vm-mwddhxqn-zwt1qorx",
+  "relayIndex": 0,
+  "maxMinutes": 240,
+  "state": "running",
+  "step": 5,
+  "minutesLeft": 232,
+  "todoOpen": 0,
+  "updatedAt": "2026-11-12T09:58:37.291Z",
+  "byok": {
+    "active": false,
+    "source": "admin",
+    "roles": {
+      "steps": "admin",
+      "subagent": "admin",
+      "summarize": "admin",
+      "repair": "admin",
+      "consult": "admin",
+      "vision": "admin",
+      "image": "admin"
+    }
+  }
+}
