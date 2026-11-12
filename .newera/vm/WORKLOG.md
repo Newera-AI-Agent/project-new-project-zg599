@@ -47,3 +47,5 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T12:50:58.520Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > BRIEF.md <<'EOF' # RED-TEAM BRIEF — pollinations (authorized, local-only) ## 
 - [2026-11-12T13:29:14.143Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== vitest.config ===' && cat vitest.config.ts && echo '=== package.json ===' 
 - [2026-11-12T13:31:29.458Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF'
+- [2026-11-12T13:35:37.479Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf findings research waves && cat > poc/ssrf/user-media
+- [2026-11-12T13:35:37.800Z | VM 1/3] RELAY checkpoint at step 172 — handoff committed, VM 2 continues.

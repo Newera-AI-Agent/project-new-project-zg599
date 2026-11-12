@@ -1,0 +1,37 @@
+
+ RUN  v2.1.9 /home/runner/work/project-new-project-zg599/project-new-project-zg599
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > VULNERABLE: validateUserMediaUrl accepts loopback via trailing-dot FQDN > http://localhost./x.png is ALLOWED and resolves to loopback
+[VULN] validateUserMediaUrl(http://localhost./x.png) -> ok=true reason=- dns(localhost.)=::1,127.0.0.1
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://localhost/x.png
+[CONTROL] validateUserMediaUrl(http://localhost/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://127.0.0.1/x.png
+[CONTROL] validateUserMediaUrl(http://127.0.0.1/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://[::1]/x.png
+[CONTROL] validateUserMediaUrl(http://[::1]/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://2130706433/x.png
+[CONTROL] validateUserMediaUrl(http://2130706433/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://0x7f000001/x.png
+[CONTROL] validateUserMediaUrl(http://0x7f000001/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://127.1/x.png
+[CONTROL] validateUserMediaUrl(http://127.1/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://10.0.0.1/x.png
+[CONTROL] validateUserMediaUrl(http://10.0.0.1/x.png) -> ok=false reason=private
+
+stdout | poc/ssrf/user-media-url-hostname-bypass.test.ts > NEGATIVE CONTROLS (not vulnerabilities, filter behaves correctly) > blocks http://169.254.169.254/x.png
+[CONTROL] validateUserMediaUrl(http://169.254.169.254/x.png) -> ok=false reason=private
+
+ ✓ poc/ssrf/user-media-url-hostname-bypass.test.ts (9 tests) 13ms
+
+ Test Files  1 passed (1)
+      Tests  9 passed (9)
+   Start at  13:35:37
+   Duration  314ms (transform 39ms, setup 0ms, collect 34ms, tests 13ms, environment 0ms, prepare 64ms)
+
