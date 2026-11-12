@@ -1,0 +1,575 @@
+===== gen.pollinations.ai/src/index.ts =====
+     1	/**
+     2	 * gen.pollinations.ai - API generation gateway
+     3	 *
+     4	 * Generation, account API, and docs routes are handled in this worker. Auth,
+     5	 * billing UI, and other control-plane routes remain owned by enter.pollinations.ai.
+     6	 *
+     7	 * URL Mapping:
+     8	 *   gen.pollinations.ai/              -> docs SEO landing
+     9	 *   gen.pollinations.ai/docs          -> docs handled locally
+    10	 *   gen.pollinations.ai/models        -> generation models
+    11	 *   gen.pollinations.ai/account/*     -> enter account API
+    12	 *   gen.pollinations.ai/quests/catalog -> public quest catalog from enter
+    13	 *   gen.pollinations.ai/image/*       -> image generation
+    14	 *   gen.pollinations.ai/text/*        -> text generation
+    15	 *   gen.pollinations.ai/audio/*       -> audio generation
+    16	 *   gen.pollinations.ai/video/*       -> video generation
+    17	 *   gen.pollinations.ai/v1/*          -> OpenAI-compatible generation
+    18	 */
+    19	
+    20	import { handleError } from "@shared/error.ts";
+    21	import { requestId } from "@shared/middleware/request-id.ts";
+    22	import { getPublicOrigin } from "@shared/public-origin.ts";
+    23	import { type Context, Hono } from "hono";
+    24	import { cors } from "hono/cors";
+    25	import { HTTPException } from "hono/http-exception";
+    26	import { PatternRouter } from "hono/router/pattern-router";
+    27	import type { Env } from "@/env.ts";
+    28	import {
+    29	    acceptsMarkdown,
+    30	    agentDiscoveryLinks,
+    31	} from "@/middleware/agent-discovery.ts";
+    32	import { logger } from "@/middleware/logger.ts";
+    33	import { edgeRateLimit } from "@/middleware/rate-limit-edge.ts";
+    34	import {
+    35	    GENERATION_HANDOFF_PATH,
+    36	    generationHandoffRoutes,
+    37	} from "@/utils/execute-generation.ts";
+    38	import { refreshCommunityModelRegistryCache } from "./community-models.ts";
+    39	import { nameD1Caller, withD1Calls } from "./d1-calls.ts";
+    40	import { audioRoutes } from "./routes/audio.ts";
+    41	import { stopExpiredAzureSandboxes } from "./routes/azure-sandboxes.ts";
+    42	import {
+    43	    buildMergedOpenApiSpec,
+    44	    createDocsRoutes,
+    45	    LLMS_FULL_TEXT,
+    46	} from "./routes/docs.ts";
+    47	import {
+    48	    E2B_PATH,
+    49	    e2bRoutes,
+    50	    keepSandboxes,
+    51	    sandboxPortHost,
+    52	    servePort,
+    53	} from "./routes/e2b.ts";
+    54	import { jobRoutes } from "./routes/jobs.ts";
+    55	import { mcpRoutes } from "./routes/mcp.ts";
+    56	import { mcpCardRoutes } from "./routes/mcp-card.ts";
+    57	import { createMessagesRoutes } from "./routes/messages.ts";
+    58	import { modelStatsRoutes, modelStatusRoutes } from "./routes/model-status.ts";
+    59	import { proxyRoutes } from "./routes/proxy.ts";
+    60	import { docsLandingHtml, manifestResponse } from "./routes/seo.ts";
+    61	import { stemSeparationRoutes } from "./routes/stem-separation.ts";
+    62	import { wellKnownRoutes } from "./routes/well-known.ts";
+    63	import { serveSite } from "./sites.ts";
+    64	
+    65	export { CommunityModelRateLimiter } from "./durable-objects/CommunityModelRateLimiter.ts";
+    66	export { GenerationCoordinator } from "./durable-objects/GenerationCoordinator.ts";
+    67	
+    68	const app = new Hono<Env>();
+    69	
+    70	const PERMISSIVE_CORS_OPTIONS = {
+    71	    origin: "*",
+    72	    allowMethods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    73	    // Empty allowHeaders makes Hono reflect Access-Control-Request-Headers.
+    74	    allowHeaders: [],
+    75	    // Public API responses are bearer-token based, not credentialed cookies.
+    76	    exposeHeaders: ["*"],
+    77	    maxAge: 600,
+    78	};
+    79	
+    80	/** Append X-Robots-Tag to prevent search engines from indexing API responses. */
+    81	function noIndex(response: Response): Response {
+    82	    const res = new Response(response.body, response);
+    83	    res.headers.set("X-Robots-Tag", "noindex, nofollow");
+    84	    return res;
+    85	}
+    86	
+    87	function rewriteRequest(request: Request, url: URL): Request {
+    88	    return new Request(url.toString(), request);
+    89	}
+    90	
+    91	function notFound(): Response {
+    92	    return noIndex(new Response("Not Found", { status: 404 }));
+    93	}
+    94	
+    95	function robotsTxt(c: Context<Env>): Response {
+    96	    const origin = getPublicOrigin(c);
+    97	    return new Response(
+    98	        [
+    99	            "User-agent: *",
+   100	            "Allow: /docs",
+   101	            "Allow: /docs/llm.txt",
+   102	            "Disallow: /image/",
+   103	            "Disallow: /text/",
+   104	            "Disallow: /video/",
+   105	            "Disallow: /audio/",
+   106	            "Disallow: /embeddings/",
+   107	            "Disallow: /mcp/",
+   108	            "Disallow: /v1/",
+   109	            "Disallow: /api/",
+   110	            // https://contentsignals.org
+   111	            "Content-Signal: search=yes, ai-input=yes, ai-train=yes",
+   112	            "",
+   113	            `Sitemap: ${origin}/sitemap.xml`,
+   114	        ].join("\n"),
+   115	        { headers: { "Content-Type": "text/plain" } },
+   116	    );
+   117	}
+   118	
+   119	/** Serve a minimal XML sitemap for the public HTML pages (crawler discovery). */
+   120	function sitemapXml(c: Context<Env>): Response {
+   121	    const origin = getPublicOrigin(c);
+   122	    return new Response(
+   123	        [
+   124	            '<?xml version="1.0" encoding="UTF-8"?>',
+   125	            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+   126	            "  <url>",
+   127	            `    <loc>${origin}/docs</loc>`,
+   128	            "  </url>",
+   129	            "</urlset>",
+   130	        ].join("\n"),
+   131	        {
+   132	            headers: {
+   133	                "Content-Type": "application/xml; charset=utf-8",
+   134	                "Cache-Control": "public, max-age=3600",
+   135	            },
+   136	        },
+   137	    );
+   138	}
+   139	
+   140	function llmsTxt(c: Context<Env>): Response {
+   141	    const origin = getPublicOrigin(c);
+   142	    return new Response(
+   143	        `# Pollinations
+   144	
+   145	> Generate text, images, audio, video, 3D, and embeddings through the Pollinations API, CLI, or MCP server. API calls use a Pollinations key.
+   146	
+   147	## Start here
+   148	
+   149	- [Full docs in one file](${origin}/llms-full.txt): The API guide, CLI skill, and task recipes in a single request.
+   150	- [Polli CLI task recipes](${origin}/docs/polli-tasks.md): Connect OpenCode or generate an image, with a check for the first result.
+   151	- [Polli CLI agent skill](${origin}/docs/polli-skill.md): Commands, authentication, structured output, and common tasks.
+   152	- [Agent Skills index](${origin}/.well-known/agent-skills/index.json): Install the polli skill with any Agent Skills discovery client.
+   153	- [Direct REST API skill](${origin}/.well-known/agent-skills/pollinations-api/SKILL.md): Call the API with curl or fetch when the CLI cannot be installed.
+   154	- [Pollinations SDK skill](${origin}/.well-known/agent-skills/pollinations-sdk/SKILL.md): Use the official npm SDK from code with an API key.
+   155	- [Bring Your Own Pollen skill](${origin}/.well-known/agent-skills/bring-your-own-pollen/SKILL.md): Add user-paid Pollinations Connect (OAuth PKCE, fragment, or device flow) so each user spends their own Pollen.
+   156	- [API catalog](${origin}/.well-known/api-catalog): RFC 9727 linkset pointing agents at the OpenAPI schema and the plain-text API guide.
+   157	- [API quick start and reference](${origin}/docs/llm.txt): Plain-text API reference and guides.
+   158	- [Interactive API docs](${origin}/docs): Browse endpoints and examples in a browser.
+   159	- [OpenAPI schema](${origin}/openapi.json): Current endpoints and request schemas.
+   160	- [Live model catalog](${origin}/models): Current model IDs and capabilities.
+   161	- [MCP server catalog](${origin}/mcp): Agent tools and server URLs.
+   162	- [OAuth protected resource metadata](${origin}/.well-known/oauth-protected-resource): RFC 9728 pointer to the authorization server that issues API keys.
+   163	- [MCP AI Catalog](${origin}/.well-known/ai-catalog.json): SEP-2127 discovery of MCP Server Cards.
+   164	
+   165	## Guides
+   166	
+   167	- [Pollinations Pay (BYOP)](${origin}/docs/llm.txt?section=byop): Let users pay with their own Pollen.
+   168	- [Publish an Agent](${origin}/docs/llm.txt?section=publish-an-agent): Publish a hosted agent.
+   169	- [Publish a Model](${origin}/docs/llm.txt?section=publish-a-model): Connect your model endpoint.
+   170	- [Sandboxes](${origin}/docs/llm.txt?section=sandboxes): Run code in a virtual machine.
+   171	- [Sites](${origin}/docs/llm.txt?section=sites): Host a static site at <name>.pollinations.app.
+   172	- [Coding Harnesses](${origin}/docs/llm.txt?section=coding-harnesses): Connect a coding assistant.
+   173	- [MCP Servers](${origin}/docs/llm.txt?section=mcp): Give agents access to tools.
+   174	- [CLI](${origin}/docs/llm.txt?section=cli): Use Pollinations from a terminal.
+   175	
+   176	## Contribute
+   177	
+   178	- [Quest contributor agent skill](${origin}/.well-known/agent-skills/quest-contributor/SKILL.md): Find a POLLEN-QUEST issue, submit a PR, and claim the Pollen reward.
+   179	
+   180	## Account
+   181	
+   182	- [Create a secret key](https://enter.pollinations.ai/keys): Sign in and manage keys.
+   183	- [Buy a prepaid key with USDC (x402)](${origin}/docs/llm.txt?section=x402): No account or sign-in; pay from $0.01 on Base.
+   184	- [Balance and Pollen](https://enter.pollinations.ai/pollen): Check available credits.
+   185	`,
+   186	        {
+   187	            headers: {
+   188	                "Content-Type": "text/plain; charset=utf-8",
+   189	                "Cache-Control": "public, max-age=3600",
+   190	            },
+   191	        },
+   192	    );
+   193	}
+   194	
+   195	async function fetchEnter(c: Context<Env>, url: URL): Promise<Response> {
+   196	    const response = await c.env.ENTER.fetch(rewriteRequest(c.req.raw, url));
+   197	    return noIndex(response);
+   198	}
+   199	
+   200	function stripTrailingSlash(path: string): string {
+   201	    return path.length > 1 ? path.replace(/\/+$/, "") : path;
+   202	}
+   203	
+   204	function isDocsPath(path: string): boolean {
+   205	    return (
+   206	        path === "/docs" ||
+   207	        path.startsWith("/docs/") ||
+   208	        path === "/openapi.json"
+   209	    );
+   210	}
+   211	
+   212	function redirectLegacyDocs(c: Context<Env>): Response {
+   213	    const reqUrl = new URL(c.req.url);
+   214	    const publicOrigin = new URL(getPublicOrigin(c));
+   215	    const url = new URL(reqUrl.pathname + reqUrl.search, publicOrigin);
+   216	    url.pathname = url.pathname.replace(/^\/api\/docs(?=\/|$)/, "/docs");
+   217	    url.pathname = stripTrailingSlash(url.pathname);
+   218	    return c.redirect(url.toString(), 301);
+   219	}
+   220	
+   221	app.use("*", cors(PERMISSIVE_CORS_OPTIONS))
+   222	    .use("*", requestId())
+   223	    .use("*", nameD1Caller)
+   224	    .use("*", logger)
+   225	    .use("*", async (c, next) => {
+   226	        await next();
+   227	        if (c.env.ENVIRONMENT === "staging") {
+   228	            c.header("X-Robots-Tag", "noindex, nofollow");
+   229	        }
+   230	        if (c.res.status === 401) {
+   231	            c.header(
+   232	                "WWW-Authenticate",
+   233	                `Bearer resource_metadata="${getPublicOrigin(c)}/.well-known/oauth-protected-resource"`,
+   234	            );
+   235	        }
+   236	    })
+   237	    .use("*", agentDiscoveryLinks())
+   238	    .get("/robots.txt", (c) => robotsTxt(c))
+   239	    .get("/sitemap.xml", (c) => sitemapXml(c))
+   240	    .get("/llms.txt", (c) => llmsTxt(c))
+   241	    .get("/llms-full.txt", (c) =>
+   242	        c.text(LLMS_FULL_TEXT, 200, {
+   243	            "Cache-Control": "public, max-age=3600",
+   244	        }),
+   245	    )
+   246	    .get("/manifest.webmanifest", () => manifestResponse())
+   247	    .route("/.well-known", wellKnownRoutes)
+   248	    // Coordinator alarms run generations here, under the zone's timeout.
+   249	    .route(GENERATION_HANDOFF_PATH, generationHandoffRoutes)
+   250	    .get("/", async (c) => {
+   251	        c.header("Vary", "Accept", { append: true });
+   252	        if (acceptsMarkdown(c.req.header("accept") ?? "")) {
+   253	            // Cloudflare ignores Vary on cached responses: keep it private.
+   254	            return c.body(await llmsTxt(c).text(), 200, {
+   255	                "Content-Type": "text/markdown; charset=utf-8",
+   256	                "Cache-Control": "private, max-age=3600",
+   257	            });
+   258	        }
+   259	        return c.html(docsLandingHtml(c));
+   260	    })
+   261	    .get("/docs/", (c) => c.redirect(`${getPublicOrigin(c)}/docs`, 301))
+   262	    .all("/api/docs", redirectLegacyDocs)
+   263	    .all("/api/docs/", redirectLegacyDocs)
+   264	    .all("/api/docs/*", redirectLegacyDocs)
+   265	    .all("/api", () => notFound())
+   266	    .all("/api/*", () => notFound())
+   267	    // Account calls reach Enter's D1, so they share gen's edge limit: one IP
+   268	    // rotating made-up keys cannot turn into one D1 lookup per request.
+   269	    // Hono's "/account/*" also matches "/account".
+   270	    .use("/account/*", edgeRateLimit)
+   271	    .all("/account", (c) => fetchEnter(c, new URL(c.req.url)))
+   272	    .all("/account/", (c) => fetchEnter(c, new URL(c.req.url)))
+   273	    .all("/account/*", (c) => {
+   274	        const url = new URL(c.req.url);
+   275	        url.pathname = `/api${stripTrailingSlash(url.pathname)}`;
+   276	        return fetchEnter(c, url);
+   277	    })
+   278	    // The read-only quest catalog. Per-account quest rewards live under
+   279	    // /account/quests.
+   280	    .all("/quests/catalog", (c) => {
+   281	        if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+   282	            return notFound();
+   283	        }
+   284	        const url = new URL(c.req.url);
+   285	        url.pathname = `/api${stripTrailingSlash(url.pathname)}`;
+   286	        return fetchEnter(c, url);
+   287	    })
+   288	    // Generation routes: docs, models, and media/text/audio/video APIs live at
+   289	    // the public gen origin without an internal /api prefix.
+   290	    .use("*", async (c, next) => {
+   291	        await next();
+   292	        if (!isDocsPath(c.req.path)) {
+   293	            c.header("X-Robots-Tag", "noindex, nofollow");
+   294	        }
+   295	    })
+   296	    .route("/docs", createDocsRoutes(app))
+   297	    .route("/v1/audio", audioRoutes)
+   298	    .route("/", stemSeparationRoutes)
+   299	    .route("/", mcpRoutes)
+   300	    // SEP-2127 Server Cards stay public: mcpRoutes' auth middleware matches
+   301	    // only the exact /mcp/:serverId path, while its /mcp/* edge rate limit
+   302	    // still runs first because the cards are mounted after it.
+   303	    .route("/", mcpCardRoutes)
+   304	    .route(E2B_PATH, e2bRoutes)
+   305	    // Conventional, discoverable alias for the merged OpenAPI spec. JSON-only;
+   306	    // the ?format=yaml passthrough stays on /docs/open-api/generate-schema.
+   307	    // Must be registered before the "/" proxy catch-all or it gets shadowed.
+   308	    .get("/openapi.json", async (c) => {
+   309	        const merged = await buildMergedOpenApiSpec(c, app);
+   310	        return c.json(merged);
+   311	    })
+   312	    .route("/", jobRoutes)
+   313	    .route("/", modelStatusRoutes)
+   314	    .route("/", modelStatsRoutes)
+   315	    .route(
+   316	        "/",
+   317	        createMessagesRoutes((request, c) =>
+   318	            app.fetch(request, c.env, c.executionCtx),
+   319	        ),
+   320	    )
+   321	    .route("/", proxyRoutes);
+   322	
+   323	let methodRouter: PatternRouter<string> | undefined;
+   324	
+   325	/** The methods some route serves at this path. */
+   326	function allowedMethods(path: string): Set<string> {
+   327	    if (!methodRouter) {
+   328	        methodRouter = new PatternRouter<string>();
+   329	        for (const route of app.routes) {
+   330	            if (route.method !== "ALL") {
+   331	                methodRouter.add("ALL", route.path, route.method);
+   332	            }
+   333	        }
+   334	    }
+   335	    const methods = new Set(
+   336	        methodRouter.match("GET", path)[0].map(([method]) => method),
+   337	    );
+   338	    if (methods.has("GET")) methods.add("HEAD");
+   339	    return methods;
+   340	}
+   341	
+   342	app.notFound(async (c: Context<Env>) => {
+   343	    // Gen's icons and images in public/.
+   344	    if (c.req.method === "GET" || c.req.method === "HEAD") {
+   345	        const asset = await c.env.ASSETS.fetch(c.req.raw);
+   346	        if (asset.status !== 404) return asset;
+   347	    }
+   348	    // A known path called with the wrong method is a 405, not a 404
+   349	    // (RFC 9110 §15.5.6), so a GET probe of POST /v1/chat/completions
+   350	    // does not conclude the endpoint is missing.
+   351	    const allow = allowedMethods(c.req.path);
+   352	    if (allow.size > 0 && !allow.has(c.req.method)) {
+   353	        const response = await handleError(new HTTPException(405), c);
+   354	        response.headers.set("Allow", [...allow].join(", "));
+   355	        return response;
+   356	    }
+   357	    return handleError(new HTTPException(404), c);
+   358	});
+   359	
+   360	app.onError(handleError);
+   361	
+   362	export default {
+   363	    fetch: (request: Request, env, ctx) =>
+   364	        withD1Calls(
+   365	            env,
+   366	            ctx,
+   367	            () => ({ route_path: "", method: request.method }),
+   368	            () => {
+   369	                // A port host belongs to a sandbox, a site's host to the site.
+   370	                const port = sandboxPortHost(
+   371	                    env,
+   372	                    new URL(request.url).hostname,
+   373	                );
+   374	                if (port) {
+   375	                    return new Hono<Env>()
+   376	                        .use("*", edgeRateLimit)
+   377	                        .all("*", () => servePort(request, env, ctx, port))
+   378	                        .onError(handleError)
+   379	                        .fetch(request, env, ctx);
+   380	                }
+   381	                return serveSite(request, env) ?? app.fetch(request, env, ctx);
+   382	            },
+   383	        ),
+   384	    scheduled: (controller, env, ctx) =>
+   385	        withD1Calls(
+   386	            env,
+   387	            ctx,
+   388	            () => ({ route_path: controller.cron, method: "CRON" }),
+   389	            () => runScheduled(controller, env, ctx),
+   390	        ),
+   391	} satisfies ExportedHandler<CloudflareBindings>;
+   392	
+   393	async function runScheduled(
+   394	    controller: ScheduledController,
+   395	    env: CloudflareBindings,
+   396	    ctx: ExecutionContext,
+   397	): Promise<void> {
+   398	    if (controller.cron === "* * * * *") {
+   399	        // infra-watch reads the heartbeat's age to spot a failing refresh.
+   400	        await refreshCommunityModelRegistryCache(env)
+   401	            .then(() =>
+   402	                env.KV.put(
+   403	                    "heartbeat:community-catalog",
+   404	                    Date.now().toString(),
+   405	                ),
+   406	            )
+   407	            .catch((error) => {
+   408	                console.error("Community model catalog refresh failed", error);
+   409	            });
+   410	        return;
+   411	    }
+   412	    // Every 5 minutes. Leases end only after the keeper has renewed the
+   413	    // kept sandboxes; catalog refreshes do not change their cadence. A
+   414	    // failed keeper still stops expired boxes: a lease outlives one run.
+   415	    try {
+   416	        await keepSandboxes(env, ctx);
+   417	    } finally {
+   418	        await stopExpiredAzureSandboxes(env);
+   419	    }
+   420	    await env.KV.put("heartbeat:sandbox-keeper", Date.now().toString());
+   421	}
+===== gen.pollinations.ai/src/env.ts =====
+     1	import type { ErrorVariables } from "@shared/error.ts";
+     2	import type { RequestIdVariables } from "hono/request-id";
+     3	import type { AuthVariables } from "@/middleware/auth.ts";
+     4	import type { BalanceVariables } from "@/middleware/balance.ts";
+     5	import type { GenerationCacheVariables } from "@/middleware/generation-cache.ts";
+     6	import type { LoggerVariables } from "@/middleware/logger.ts";
+     7	import type { SafetyVariables } from "@/middleware/safety.ts";
+     8	import type { ModelVariables } from "./middleware/model.ts";
+     9	import type { TrackVariables } from "./middleware/track.ts";
+    10	import type { TextVariables } from "./text/types.ts";
+    11	
+    12	export type Env = {
+    13	    Bindings: CloudflareBindings & {
+    14	        CODE_AGENTS?: DispatchNamespace;
+    15	        SITES?: DispatchNamespace;
+    16	        SITES_HOST_SUFFIX?: string;
+    17	        SANDBOX_DOMAIN?: string;
+    18	        DOCS_APP_KEY?: string;
+    19	    };
+    20	    Variables: RequestIdVariables &
+    21	        LoggerVariables &
+    22	        ErrorVariables &
+    23	        AuthVariables &
+    24	        BalanceVariables &
+    25	        GenerationCacheVariables &
+    26	        SafetyVariables &
+    27	        TrackVariables &
+    28	        ModelVariables &
+    29	        TextVariables;
+    30	};
+===== enter.pollinations.ai/src/index.ts =====
+     1	import { handleError } from "@shared/error.ts";
+     2	import { requestId } from "@shared/middleware/request-id.ts";
+     3	import { getPublicOrigin } from "@shared/public-origin.ts";
+     4	import { rateLimit } from "@shared/rate-limit.ts";
+     5	import type { Context } from "hono";
+     6	import { Hono } from "hono";
+     7	import { cors } from "hono/cors";
+     8	import { HTTPException } from "hono/http-exception";
+     9	import { api } from "./api.ts";
+    10	import type { Env } from "./env.ts";
+    11	import { logger } from "./middleware/logger.ts";
+    12	import { createDocsRoutes } from "./routes/docs.ts";
+    13	import {
+    14	    LEADERBOARD_SLICE_PAUSE_MS,
+    15	    refreshQuestLeaderboard,
+    16	} from "./routes/quest-leaderboard.ts";
+    17	import { getCurrentGenOrigin, wellKnownRoutes } from "./routes/well-known.ts";
+    18	import { handleCodeAgentOutbound } from "./services/code-agent-outbound.ts";
+    19	
+    20	function stripTrailingSlash(path: string): string {
+    21	    return path.length > 1 ? path.replace(/\/+$/, "") : path;
+    22	}
+    23	
+    24	function isApiDocsPath(path: string): boolean {
+    25	    return path === "/api/docs" || path.startsWith("/api/docs/");
+    26	}
+    27	
+    28	function redirectLegacyDocs(c: Context<Env>): Response {
+    29	    const reqUrl = new URL(c.req.url);
+    30	    const publicOrigin = new URL(getPublicOrigin(c));
+    31	    const url = new URL(reqUrl.pathname + reqUrl.search, publicOrigin);
+    32	    url.hostname = url.hostname.replace(/(^|\.)enter\./, "$1gen.");
+    33	    url.protocol = "https:";
+    34	    url.pathname = url.pathname.replace(/^\/api\/docs(?=\/|$)/, "/docs");
+    35	    url.pathname = stripTrailingSlash(url.pathname);
+    36	    return c.redirect(url.toString(), 301);
+    37	}
+    38	
+    39	const app = new Hono<Env>()
+    40	    .use(
+    41	        "*",
+    42	        cors({
+    43	            origin: "*",
+    44	            allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    45	            allowHeaders: [],
+    46	            exposeHeaders: ["Content-Length", "Content-Disposition"],
+    47	            maxAge: 600,
+    48	        }),
+    49	    )
+    50	    .use("*", requestId())
+    51	    .use("*", logger)
+    52	    // Prevent search engines from indexing API responses (except docs)
+    53	    .use("/api/*", async (c, next) => {
+    54	        await next();
+    55	        if (!isApiDocsPath(c.req.path)) {
+    56	            c.header("X-Robots-Tag", "noindex, nofollow");
+    57	        }
+    58	    })
+    59	    .use("/api/*", rateLimit({ byIp: false }))
+    60	    .route("/api/docs", createDocsRoutes(api))
+    61	    .all("/api/docs", redirectLegacyDocs)
+    62	    .all("/api/docs/", redirectLegacyDocs)
+    63	    .all("/api/docs/*", redirectLegacyDocs)
+    64	    .all("/api/generate/*", (c) => {
+    65	        const reqUrl = new URL(c.req.url);
+    66	        const publicOrigin = new URL(getPublicOrigin(c));
+    67	        const url = new URL(reqUrl.pathname + reqUrl.search, publicOrigin);
+    68	        url.hostname = url.hostname.replace(/(^|\.)enter\./, "$1gen.");
+    69	        url.protocol = "https:";
+    70	        url.pathname = url.pathname.replace(/^\/api\/generate/, "");
+    71	        c.header("Deprecation", "true");
+    72	        c.header(
+    73	            "Link",
+    74	            `<${getCurrentGenOrigin(c)}>; rel="successor-version"`,
+    75	        );
+    76	        return c.redirect(url.toString(), 308);
+    77	    })
+    78	    .route("/.well-known", wellKnownRoutes)
+    79	    .route("/api", api);
+    80	
+    81	app.notFound(async (c: Context<Env>) => {
+    82	    return await handleError(new HTTPException(404), c);
+    83	});
+    84	
+    85	app.onError(handleError);
+    86	
+    87	export default {
+    88	    fetch(request, env, ctx) {
+    89	        if (env.CODE_AGENT_CONTEXT) {
+    90	            return handleCodeAgentOutbound(request, env.CODE_AGENT_CONTEXT);
+    91	        }
+    92	        return app.fetch(request, env, ctx);
+    93	    },
+    94	    // Every 15 minutes (wrangler.toml).
+    95	    async scheduled(_controller, env) {
+    96	        await refreshQuestLeaderboard(env, LEADERBOARD_SLICE_PAUSE_MS);
+    97	    },
+    98	} satisfies ExportedHandler<Env["Bindings"]>;
+===== enter.pollinations.ai/src/env.ts =====
+     1	import type { ErrorVariables } from "@shared/error.ts";
+     2	import type { RequestIdVariables } from "hono/request-id";
+     3	import type { LoggerVariables } from "./middleware/logger.ts";
+     4	
+     5	export type Env = {
+     6	    Bindings: CloudflareBindings & {
+     7	        WEFT_SELLER_API_KEY?: string;
+     8	        WEFT_FACILITATOR_URL?: string;
+     9	        WEFT_PAY_TO?: string;
+    10	        WEFT_NETWORK?: string;
+    11	        X402_HOLDING_USER_ID?: string;
+    12	        CODE_AGENT_DEPLOY_API_TOKEN?: string;
+    13	        CODE_AGENT_DISPATCH_NAMESPACE?: string;
+    14	        SITES_DISPATCH_NAMESPACE?: string;
+    15	        SITES_HOST_SUFFIX?: string;
+    16	        CODE_AGENT_CONTEXT?: {
+    17	            authorization: string;
+    18	            origin: string;
+    19	        };
+    20	    };
+    21	    Variables: RequestIdVariables & LoggerVariables & ErrorVariables;
+    22	};
