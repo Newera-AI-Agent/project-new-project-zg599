@@ -1,53 +1,49 @@
 import { describe, expect, it } from "vitest";
 import dns from "node:dns/promises";
 import { validateUserMediaUrl } from "@shared/user-media-url.ts";
-import { validateCommunityEndpointUrl } from "@shared/community-endpoint-urls.ts";
 
-// Every one of these strings is a loopback address in disguise.
-// The PoC asserts the ACTUAL upstream behaviour: the SSRF filter ACCEPTS them
-// (result.ok === true), i.e. the defect is real and reproducible.
-const LOOPBACK_ENCODINGS = [
-  "http://2130706433/a.png", // decimal 32-bit form of 127.0.0.1
-  "http://0x7f000001/a.png", // hex form of 127.0.0.1
-  "http://127.1/a.png", // short (a.b) form of 127.0.0.1
-  "http://localhost./a.png", // trailing-dot FQDN form
-  "http://127.0.0.1./a.png", // trailing-dot IPv4 form
-];
-
-async function resolvesToLoopback(hostname: string): Promise<string[]> {
-  const records = await dns.lookup(hostname, { all: true });
-  return records.map((r) => r.address);
-}
-
+// DEFECT (VULNERABLE upstream): shared/user-media-url.ts blocks the literal
+// host "localhost" with /^localhost$/i, but the WHATWG URL parser keeps the
+// trailing dot of a FQDN, so "localhost." survives the regex and resolves to
+// 127.0.0.1 via the resolver. The filter therefore ALLOWS a loopback target.
 describe("SSRF blocklist bypass - shared/user-media-url.ts (VULNERABLE upstream)", () => {
-  for (const value of LOOPBACK_ENCODINGS) {
-    it(`filter ACCEPTS loopback-in-disguise ${value}`, async () => {
-      const result = validateUserMediaUrl(value);
-      const host = new URL(value).hostname;
-      const addresses = await resolvesToLoopback(host);
-      console.log(
-        `[user-media-url] ${value} -> allowed=${result.ok} host=${host} resolves=${addresses.join(",")}`,
-      );
-      // Defect: the validator ALLOWS a host that resolves to loopback.
-      expect(result.ok).toBe(true);
-      expect(addresses.some((a) => a === "127.0.0.1" || a === "::1")).toBe(true);
-    });
-  }
+  it("filter ACCEPTS trailing-dot loopback FQDN http://localhost./a.png", async () => {
+    const value = "http://localhost./a.png";
+    const result = validateUserMediaUrl(value);
+    const host = new URL(value).hostname;
+    const addresses = (await dns.lookup(host, { all: true })).map((r) => r.address);
+    console.log(
+      `[user-media-url] ${value} -> allowed=${result.ok} reason=${result.ok ? "-" : result.reason} host=${host} resolves=${addresses.join(",")}`,
+    );
+    // The defect: the SSRF filter ALLOWS a host that resolves to loopback.
+    expect(result.ok).toBe(true);
+    expect(host).toBe("localhost.");
+    expect(addresses).toContain("127.0.0.1");
+  });
 });
 
-describe("NEGATIVE CONTROL - shared/community-endpoint-urls.ts blocks the same encodings", () => {
-  for (const value of [
-    "https://2130706433/v1/chat/completions",
-    "https://0x7f000001/v1/chat/completions",
-    "https://127.1/v1/chat/completions",
-  ]) {
-    it(`filter REFUSES loopback-in-disguise ${value}`, async () => {
-      const host = new URL(value).hostname;
-      const addresses = await resolvesToLoopback(host);
+// NEGATIVE CONTROL: the same filter correctly refuses every other loopback
+// encoding, proving the trailing-dot case is a specific gap, not a misreading.
+describe("NEGATIVE CONTROL - other loopback encodings are refused", () => {
+  const refused = [
+    "http://localhost/a.png",
+    "http://2130706433/a.png",
+    "http://0x7f000001/a.png",
+    "http://127.1/a.png",
+    "http://127.0.0.1/a.png",
+    "http://127.0.0.1./a.png",
+    "http://10.0.0.1/a.png",
+    "http://169.254.169.254/a.png",
+    "http://[::1]/a.png",
+    "http://sub.localhost/a.png",
+  ];
+  for (const value of refused) {
+    it(`filter REFUSES ${value}`, () => {
+      const result = validateUserMediaUrl(value);
       console.log(
-        `[community-endpoint-urls] ${value} -> resolves=${addresses.join(",")}`,
+        `[user-media-url] ${value} -> allowed=${result.ok} reason=${result.ok ? "-" : result.reason}`,
       );
-      expect(() => validateCommunityEndpointUrl(value)).toThrow();
+      expect(result.ok).toBe(false);
     });
   }
 });
