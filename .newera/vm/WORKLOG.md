@@ -53,3 +53,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T13:36:24.045Z | VM 2/3] self-check PASS: shell: VERIFIED (the harness executed bash on this VM at boot); node: v24.22.2; npm: 11.19.1; python3: Python 3.12.3; git: repo checked out @ cbc2b43; browser: Google Chrome 156.0.8078.79 available — the browser_* tools drive it (playwright-core installs on first browser call); filesystem: WRITABLE 
 - [2026-11-12T13:36:25.885Z | VM 2/3] boot auto-setup: npm install --no-audit --no-fund ok
 - [2026-11-12T13:37:00.906Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== BRIEF.md =====' && cat BRIEF.md && echo && echo '===== TODO.md =====' &&
+- [2026-11-12T13:39:38.028Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '--- upstream install tail ---' && tail -3 /tmp/upstream-install.log && ls -d u
