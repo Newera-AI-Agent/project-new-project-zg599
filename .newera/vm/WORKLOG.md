@@ -16,3 +16,5 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T10:55:13.947Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 600 npx vitest run test/agent-run-
 - [2026-11-12T10:55:27.447Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 900 npx vitest run test/agent-run-
 - [2026-11-12T10:57:15.777Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && echo '--- root package.json ---' && cat package.json && echo '
+- [2026-11-12T11:01:28.438Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && { for f in gen.pollinations.ai/vitest.config.ts shared/vitest.
+- [2026-11-12T11:02:34.828Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && grep -n '^===== ' notes/batch1.txt && echo '--- upstream gen pkg devDeps ---' && nod

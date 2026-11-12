@@ -1,0 +1,1075 @@
+===== gen.pollinations.ai/vitest.config.ts =====
+     1	import path from "node:path";
+     2	import { fileURLToPath } from "node:url";
+     3	import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
+     4	import { buildSync } from "esbuild";
+     5	import { loadEnv } from "vite";
+     6	import { configDefaults, defineConfig } from "vitest/config";
+     7	import { codeAgentSdk } from "../enter.pollinations.ai/scripts/code-agent-sdk.mjs";
+     8	import {
+     9	    MCP_SERVERS,
+    10	    type McpServerDefinition,
+    11	} from "../shared/registry/mcp.ts";
+    12	
+    13	const genSrc = fileURLToPath(new URL("./src/", import.meta.url));
+    14	const sharedSrc = fileURLToPath(new URL("../shared/", import.meta.url));
+    15	
+    16	const genAliases = [
+    17	    "content-filter.ts",
+    18	    "cache",
+    19	    "durable-objects/GenerationCoordinator.ts",
+    20	    "env.ts",
+    21	    "error.ts",
+    22	    "events.ts",
+    23	    "logger",
+    24	    "logger.ts",
+    25	    "middleware/agent-discovery.ts",
+    26	    "middleware/auth.ts",
+    27	    "middleware/balance.ts",
+    28	    "middleware/generation-cache.ts",
+    29	    "middleware/generation-deduplication.ts",
+    30	    "middleware/logger.ts",
+    31	    "middleware/media-cache.ts",
+    32	    "middleware/model.ts",
+    33	    "middleware/rate-limit-edge.ts",
+    34	    "middleware/safety.ts",
+    35	    "middleware/text-cache.ts",
+    36	    "middleware/track.ts",
+    37	    "middleware/validator.ts",
+    38	    "routes/generation-executor.ts",
+    39	    "schemas/embeddings.ts",
+    40	    "schemas/image.ts",
+    41	    "schemas/model3d.ts",
+    42	    "schemas/models.ts",
+    43	    "schemas/realtime.ts",
+    44	    "schemas/text.ts",
+    45	    "userImage.ts",
+    46	    "util",
+    47	    "util.ts",
+    48	    "utils/api-docs.ts",
+    49	    "utils/bedrock-guardrail.ts",
+    50	    "utils/execute-generation.ts",
+    51	    "utils/generation-access.ts",
+    52	    "utils/media-cache.ts",
+    53	    "utils/model-stats.ts",
+    54	    "utils/refusals.ts",
+    55	    "utils/safety-features.ts",
+    56	    "utils/text-cache.ts",
+    57	];
+    58	
+    59	const resolve = {
+    60	    dedupe: ["hono", "hono-openapi"],
+    61	    alias: [
+    62	        ...genAliases.map((path) => ({
+    63	            find: `@/${path}`,
+    64	            replacement: `${genSrc}${path}`,
+    65	        })),
+    66	        {
+    67	            find: /^@\/embeddings\/(.*)$/,
+    68	            replacement: `${genSrc}embeddings/$1`,
+    69	        },
+    70	        {
+    71	            find: /^@\/text\/(.*)$/,
+    72	            replacement: `${genSrc}text/$1`,
+    73	        },
+    74	        {
+    75	            find: /^@\/image\/(.*)$/,
+    76	            replacement: `${genSrc}image/$1`,
+    77	        },
+    78	        {
+    79	            find: /^@\/model3d\/(.*)$/,
+    80	            replacement: `${genSrc}model3d/$1`,
+    81	        },
+    82	        {
+    83	            find: /^@shared\/(.*)$/,
+    84	            replacement: `${sharedSrc}$1`,
+    85	        },
+    86	        // piexif-ts package.json points "module"/"browser" at non-existent files;
+    87	        // pin resolution to the published UMD bundle that actually ships.
+    88	        { find: /^piexif-ts$/, replacement: "piexif-ts/dist/piexif.js" },
+    89	    ],
+    90	};
+    91	
+    92	export default defineConfig(async ({ mode }) => {
+    93	    const migrationsPath = path.join(
+    94	        __dirname,
+    95	        "../enter.pollinations.ai/drizzle",
+    96	    );
+    97	    const migrations = await readD1Migrations(migrationsPath);
+    98	    const env = loadEnv(mode, process.cwd(), "");
+    99	    // Exercise the real media RPC service, with isolated local R2 storage.
+   100	    const mediaScript = buildSync({
+   101	        entryPoints: [
+   102	            path.join(
+   103	                __dirname,
+   104	                "../media.pollinations.ai/src/media-upload.ts",
+   105	            ),
+   106	        ],
+   107	        bundle: true,
+   108	        write: false,
+   109	        format: "esm",
+   110	        external: ["cloudflare:workers"],
+   111	        tsconfig: path.join(
+   112	            __dirname,
+   113	            "../media.pollinations.ai/tsconfig.json",
+   114	        ),
+   115	        footer: { js: "export default {};" },
+   116	    }).outputFiles[0].text;
+   117	
+   118	    return {
+   119	        plugins: [
+   120	            codeAgentSdk(),
+   121	            cloudflareTest({
+   122	                wrangler: {
+   123	                    configPath: "./wrangler.toml",
+   124	                    environment: env.TEST_ENV || "test",
+   125	                },
+   126	                miniflare: {
+   127	                    workers: [
+   128	                        {
+   129	                            name: "media-test",
+   130	                            modules: true,
+   131	                            script: mediaScript,
+   132	                            compatibilityDate: "2025-11-12",
+   133	                            r2Buckets: ["MEDIA_BUCKET"],
+   134	                            bindings: { MAX_FILE_SIZE: "104857600" },
+   135	                        },
+   136	                    ],
+   137	                    bindings: {
+   138	                        TEST_MIGRATIONS: migrations,
+   139	                        TEST_VCR_MODE: env.TEST_VCR_MODE || "replay-or-record",
+   140	                    },
+   141	                    // The media Worker's bucket, so each test can reset it.
+   142	                    r2Buckets: { TEST_MEDIA_BUCKET: "MEDIA_BUCKET" },
+   143	                    serviceBindings: {
+   144	                        ...Object.fromEntries(
+   145	                            MCP_SERVERS.filter(
+   146	                                (server: McpServerDefinition) =>
+   147	                                    server.billing === "downstream" &&
+   148	                                    server.forwardAuthorization !== true,
+   149	                            ).map(({ binding }) => [
+   150	                                binding,
+   151	                                async (request: Request) =>
+   152	                                    Response.json({
+   153	                                        pathname: new URL(request.url).pathname,
+   154	                                        authorization:
+   155	                                            request.headers.get(
+   156	                                                "authorization",
+   157	                                            ),
+   158	                                        cookie: request.headers.get("cookie"),
+   159	                                        payload: await request.json(),
+   160	                                    }),
+   161	                            ]),
+   162	                        ),
+   163	                        MEDIA: {
+   164	                            name: "media-test",
+   165	                            entrypoint: "MediaUpload",
+   166	                        },
+   167	                        ENTER: async (request: Request) => {
+   168	                            const url = new URL(request.url);
+   169	                            if (
+   170	                                url.pathname ===
+   171	                                "/api/docs/open-api/generate-schema"
+   172	                            ) {
+   173	                                return Response.json({
+   174	                                    openapi: "3.1.0",
+   175	                                    info: {
+   176	                                        title: "Enter",
+   177	                                        version: "0.0.0",
+   178	                                    },
+   179	                                    paths: {},
+   180	                                    components: {},
+   181	                                });
+   182	                            }
+   183	                            // Answers key creation with the request it
+   184	                            // got, so tests see what gen sent.
+   185	                            if (url.pathname === "/api/account/keys") {
+   186	                                return Response.json({
+   187	                                    id: "enter-stub-key",
+   188	                                    key: JSON.stringify({
+   189	                                        authorization:
+   190	                                            request.headers.get(
+   191	                                                "authorization",
+   192	                                            ),
+   193	                                        body: await request.json(),
+   194	                                    }),
+   195	                                });
+   196	                            }
+   197	                            return new Response("enter test stub");
+   198	                        },
+   199	                        POLLINATIONS_MCP: async (request: Request) => {
+   200	                            if (
+   201	                                !request.headers.has("authorization") ||
+   202	                                request.headers.has("cookie")
+   203	                            ) {
+   204	                                return new Response(
+   205	                                    "Caller authorization was not forwarded safely",
+   206	                                    { status: 500 },
+   207	                                );
+   208	                            }
+   209	                            const payload = (await request.json()) as {
+   210	                                jsonrpc: string;
+   211	                                id?: string | number;
+   212	                            };
+   213	                            return Response.json({
+   214	                                jsonrpc: payload.jsonrpc,
+   215	                                id: payload.id,
+   216	                                result: {
+   217	                                    content: [
+   218	                                        {
+   219	                                            type: "text",
+   220	                                            text: "pollinations proxied",
+   221	                                        },
+   222	                                    ],
+   223	                                },
+   224	                            });
+   225	                        },
+   226	                        ASK_JEV_MCP: async (request: Request) =>
+   227	                            Response.json({
+   228	                                pathname: new URL(request.url).pathname,
+   229	                                authorization:
+   230	                                    request.headers.get("authorization"),
+   231	                                cookie: request.headers.get("cookie"),
+   232	                                payload: await request.json(),
+   233	                            }),
+   234	                        MACHINES_MCP: async (request: Request) =>
+   235	                            Response.json({
+   236	                                pathname: new URL(request.url).pathname,
+   237	                                authorization:
+   238	                                    request.headers.get("authorization"),
+   239	                                cookie: request.headers.get("cookie"),
+   240	                                payload: await request.json(),
+   241	                            }),
+   242	
+   243	                        FFMPEG_MCP: async (request: Request) => {
+   244	                            if (
+   245	                                request.headers.has("authorization") ||
+   246	                                request.headers.has("cookie")
+   247	                            ) {
+   248	                                return new Response(
+   249	                                    "Caller credentials reached MCP",
+   250	                                    { status: 500 },
+   251	                                );
+   252	                            }
+   253	                            const payload = (await request.json()) as {
+   254	                                jsonrpc: string;
+   255	                                id?: string | number;
+   256	                                method?: string;
+   257	                            };
+   258	                            const headers = new Headers({
+   259	                                "Content-Type": "application/json",
+   260	                            });
+   261	                            if (payload.method === "tools/call") {
+   262	                                headers.set("x-pollinations-mcp-cost", "0.25");
+   263	                                headers.set(
+   264	                                    "x-pollinations-mcp-tool",
+   265	                                    "runFfmpeg",
+   266	                                );
+   267	                                headers.set("x-pollinations-mcp-status", "200");
+   268	                                headers.set(
+   269	                                    "x-pollinations-mcp-adjustment-id",
+   270	                                    "cloudflare.container.basic_runtime.v1",
+   271	                                );
+   272	                                headers.set(
+   273	                                    "x-pollinations-mcp-adjustment-units",
+   274	                                    "1",
+   275	                                );
+   276	                            }
+   277	                            return Response.json(
+   278	                                {
+   279	                                    jsonrpc: payload.jsonrpc,
+   280	                                    id: payload.id,
+   281	                                    result: {
+   282	                                        content: [
+   283	                                            {
+   284	                                                type: "text",
+   285	                                                text: "ffmpeg proxied",
+   286	                                            },
+   287	                                        ],
+   288	                                    },
+   289	                                },
+   290	                                { headers },
+   291	                            );
+   292	                        },
+   293	                        EXA_MCP: async (request: Request) => {
+   294	                            if (
+   295	                                request.headers.has("authorization") ||
+   296	                                request.headers.has("cookie")
+   297	                            ) {
+   298	                                return new Response(
+   299	                                    "Caller credentials reached MCP",
+   300	                                    { status: 500 },
+   301	                                );
+   302	                            }
+   303	                            const payload = (await request.json()) as {
+   304	                                jsonrpc: string;
+   305	                                id?: string | number;
+   306	                                method?: string;
+   307	                            };
+   308	                            const headers = new Headers({
+   309	                                "Content-Type": "application/json",
+   310	                            });
+   311	                            if (payload.method === "tools/call") {
+   312	                                headers.set("x-pollinations-mcp-cost", "0.007");
+   313	                                headers.set(
+   314	                                    "x-pollinations-mcp-tool",
+   315	                                    "web_search_exa",
+   316	                                );
+   317	                                headers.set("x-pollinations-mcp-status", "200");
+   318	                                headers.set(
+   319	                                    "x-pollinations-mcp-adjustment-id",
+   320	                                    "exa.search.v1",
+   321	                                );
+   322	                                headers.set(
+   323	                                    "x-pollinations-mcp-adjustment-units",
+   324	                                    "1",
+   325	                                );
+   326	                            }
+   327	                            return Response.json(
+   328	                                {
+   329	                                    jsonrpc: payload.jsonrpc,
+   330	                                    id: payload.id,
+   331	                                    result: {
+   332	                                        content: [
+   333	                                            {
+   334	                                                type: "text",
+   335	                                                text: "exa proxied",
+   336	                                            },
+   337	                                        ],
+   338	                                    },
+   339	                                },
+   340	                                { headers },
+   341	                            );
+   342	                        },
+   343	                        COMPOSIO_MCP: async (request: Request) => {
+   344	                            if (
+   345	                                request.headers.has("authorization") ||
+   346	                                request.headers.has("cookie") ||
+   347	                                !request.headers.has("x-pollinations-user-id")
+   348	                            ) {
+   349	                                return new Response(
+   350	                                    "Caller identity was not forwarded safely",
+   351	                                    { status: 500 },
+   352	                                );
+   353	                            }
+   354	                            const payload = (await request.json()) as {
+   355	                                jsonrpc: string;
+   356	                                id?: string | number;
+   357	                            };
+   358	                            const identity = request.headers.get(
+   359	                                "x-pollinations-user-id",
+   360	                            );
+   361	                            return Response.json({
+   362	                                jsonrpc: payload.jsonrpc,
+   363	                                id: payload.id,
+   364	                                result: {
+   365	                                    content: [
+   366	                                        {
+   367	                                            type: "text",
+   368	                                            text: identity,
+   369	                                        },
+   370	                                    ],
+   371	                                },
+   372	                            });
+   373	                        },
+   374	                        COMPUTER_MCP: async (request: Request) => {
+   375	                            if (
+   376	                                request.headers.has("authorization") ||
+   377	                                request.headers.has("cookie") ||
+   378	                                !request.headers.has("x-pollinations-user-id")
+   379	                            ) {
+   380	                                return new Response(
+   381	                                    "Caller identity was not forwarded safely",
+   382	                                    { status: 500 },
+   383	                                );
+   384	                            }
+   385	                            const payload = (await request.json()) as {
+   386	                                jsonrpc: string;
+   387	                                id?: string | number;
+   388	                                method?: string;
+   389	                            };
+   390	                            const headers = new Headers();
+   391	                            if (payload.method === "tools/call") {
+   392	                                headers.set(
+   393	                                    "x-pollinations-mcp-cost",
+   394	                                    "0.0002",
+   395	                                );
+   396	                                headers.set("x-pollinations-mcp-tool", "bash");
+   397	                                headers.set("x-pollinations-mcp-status", "200");
+   398	                                headers.set(
+   399	                                    "x-pollinations-mcp-adjustment-id",
+   400	                                    "computer.tool_call.v1",
+   401	                                );
+   402	                                headers.set(
+   403	                                    "x-pollinations-mcp-adjustment-units",
+   404	                                    "1",
+   405	                                );
+   406	                            }
+   407	                            return Response.json(
+   408	                                {
+   409	                                    jsonrpc: payload.jsonrpc,
+   410	                                    id: payload.id,
+   411	                                    result: {
+   412	                                        content: [
+   413	                                            {
+   414	                                                type: "text",
+   415	                                                text: `computer:${request.headers.get("x-pollinations-user-id")}:${request.headers.get("x-pollinations-user-github")}`,
+   416	                                            },
+   417	                                        ],
+   418	                                    },
+   419	                                },
+   420	                                { headers },
+   421	                            );
+   422	                        },
+   423	                    },
+   424	                },
+   425	            }),
+   426	        ],
+   427	        resolve,
+   428	        test: {
+   429	            // Vitest's console interception can deadlock the Workers pool when a
+   430	            // handler logs during a file's last RPC (cloudflare/workers-sdk#15719).
+   431	            disableConsoleIntercept: true,
+   432	            globalSetup: ["./test/setup/snapshot-server.ts"],
+   433	            setupFiles: [
+   434	                "./test/setup/apply-migrations.ts",
+   435	                "./test/setup/public-tinybird-pipes.ts",
+   436	            ],
+   437	            exclude: [...configDefaults.exclude],
+   438	        },
+   439	    };
+   440	});
+===== shared/vitest.config.ts =====
+     1	import { fileURLToPath } from "node:url";
+     2	import { defineConfig } from "vitest/config";
+     3	
+     4	export default defineConfig({
+     5	    root: fileURLToPath(new URL("../", import.meta.url)),
+     6	    resolve: {
+     7	        alias: {
+     8	            "@shared": fileURLToPath(new URL("./", import.meta.url)),
+     9	        },
+    10	    },
+    11	    test: {
+    12	        include: ["shared/providers.test.ts", "shared/agent-json.test.ts"],
+    13	    },
+    14	});
+===== enter.pollinations.ai/vitest.config.ts =====
+     1	import { mkdirSync } from "node:fs";
+     2	import path from "node:path";
+     3	import { fileURLToPath } from "node:url";
+     4	import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
+     5	import { loadEnv } from "vite";
+     6	import tsconfigPaths from "vite-tsconfig-paths";
+     7	import { configDefaults, defineConfig } from "vitest/config";
+     8	import { codeAgentSdk } from "./scripts/code-agent-sdk.mjs";
+     9	
+    10	const sharedSrc = fileURLToPath(new URL("../shared/", import.meta.url));
+    11	const frontendSrc = fileURLToPath(new URL("./frontend/src/", import.meta.url));
+    12	const enterSrc = fileURLToPath(new URL("./src/", import.meta.url));
+    13	
+    14	export default defineConfig(async ({ mode }) => {
+    15	    const migrationsPath = path.join(__dirname, "drizzle");
+    16	    const migrations = await readD1Migrations(migrationsPath);
+    17	    // wrangler.toml declares [assets] directory = "dist/client". The Workers
+    18	    // pool refuses to start when it is missing, and backend tests do not need
+    19	    // a frontend build, so make sure the directory exists.
+    20	    mkdirSync(path.join(__dirname, "dist", "client"), { recursive: true });
+    21	    // Deployed Workers run in UTC; local workerd follows the host timezone.
+    22	    process.env.TZ = "UTC";
+    23	    const env = loadEnv(mode, process.cwd(), "");
+    24	
+    25	    return {
+    26	        plugins: [
+    27	            tsconfigPaths(),
+    28	            codeAgentSdk(),
+    29	            cloudflareTest({
+    30	                wrangler: {
+    31	                    configPath: "./wrangler.toml",
+    32	                    environment: env.TEST_ENV || "test",
+    33	                },
+    34	                miniflare: {
+    35	                    bindings: {
+    36	                        TEST_MIGRATIONS: migrations,
+    37	                    },
+    38	                    serviceBindings: {
+    39	                        COMPOSIO_MCP: async (request: Request) => {
+    40	                            const userId = request.headers.get(
+    41	                                "x-pollinations-user-id",
+    42	                            );
+    43	                            if (!userId) {
+    44	                                return Response.json(
+    45	                                    { message: "Missing user" },
+    46	                                    { status: 401 },
+    47	                                );
+    48	                            }
+    49	                            const url = new URL(request.url);
+    50	                            if (url.pathname === "/connections") {
+    51	                                if (request.method === "POST") {
+    52	                                    return Response.json({
+    53	                                        redirectUrl:
+    54	                                            "https://connect.composio.test/link",
+    55	                                    });
+    56	                                }
+    57	                                return Response.json({
+    58	                                    data: [
+    59	                                        {
+    60	                                            id: "ca_test",
+    61	                                            toolkit: "github",
+    62	                                            name: "GitHub",
+    63	                                            description: "Code hosting",
+    64	                                            logo: "https://logos.composio.test/github",
+    65	                                            alias: null,
+    66	                                            status: "ACTIVE",
+    67	                                            userId,
+    68	                                        },
+    69	                                    ],
+    70	                                });
+    71	                            }
+    72	                            if (url.pathname === "/toolkits") {
+    73	                                return Response.json({
+    74	                                    data: [
+    75	                                        {
+    76	                                            slug: "github",
+    77	                                            name: "GitHub",
+    78	                                            description: "Code hosting",
+    79	                                            logo: null,
+    80	                                        },
+    81	                                    ],
+    82	                                });
+    83	                            }
+    84	                            if (
+    85	                                request.method === "DELETE" &&
+    86	                                url.pathname === "/connections/ca_test"
+    87	                            ) {
+    88	                                return new Response(null, { status: 204 });
+    89	                            }
+    90	                            return new Response("Not found", {
+    91	                                status: 404,
+    92	                            });
+    93	                        },
+    94	                    },
+    95	                },
+    96	            }),
+    97	        ],
+    98	        resolve: {
+    99	            dedupe: ["zod"],
+   100	            alias: [
+   101	                { find: /^@\/(.*)$/, replacement: `${enterSrc}$1` },
+   102	                { find: /^@shared\/(.*)$/, replacement: `${sharedSrc}$1` },
+   103	                { find: /^@frontend\/(.*)$/, replacement: `${frontendSrc}$1` },
+   104	            ],
+   105	        },
+   106	        test: {
+   107	            // Vitest's console interception can deadlock the Workers pool when a
+   108	            // handler logs during a file's last RPC (cloudflare/workers-sdk#15719).
+   109	            disableConsoleIntercept: true,
+   110	            setupFiles: [
+   111	                "./test/setup/apply-migrations.ts",
+   112	                "./test/setup/rejection-handler.ts",
+   113	            ],
+   114	            exclude: [
+   115	                ...configDefaults.exclude,
+   116	                "test/e2e/**",
+   117	                "scripts/**",
+   118	                "observability/scripts/**",
+   119	            ],
+   120	            reporters: ["default"],
+   121	            teardownTimeout: 5000,
+   122	        },
+   123	    };
+   124	});
+===== media.pollinations.ai/vitest.config.ts =====
+     1	import path from "node:path";
+     2	import { fileURLToPath } from "node:url";
+     3	import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
+     4	import { defineConfig } from "vitest/config";
+     5	
+     6	const sharedSrc = fileURLToPath(new URL("../shared/", import.meta.url));
+     7	
+     8	export default defineConfig(async () => {
+     9	    const migrationsPath = path.join(
+    10	        __dirname,
+    11	        "../enter.pollinations.ai/drizzle",
+    12	    );
+    13	    const migrations = await readD1Migrations(migrationsPath);
+    14	
+    15	    return {
+    16	        plugins: [
+    17	            cloudflareTest({
+    18	                wrangler: {
+    19	                    configPath: "./wrangler.toml",
+    20	                },
+    21	                miniflare: {
+    22	                    bindings: {
+    23	                        TEST_MIGRATIONS: migrations,
+    24	                    },
+    25	                    // Each test answers Enter's key check itself; see mockAuth.
+    26	                    serviceBindings: {
+    27	                        ENTER: () =>
+    28	                            new Response("Enter is not mocked", {
+    29	                                status: 500,
+    30	                            }),
+    31	                    },
+    32	                },
+    33	            }),
+    34	        ],
+    35	        resolve: {
+    36	            alias: {
+    37	                "@shared": sharedSrc,
+    38	            },
+    39	        },
+    40	        test: {
+    41	            // Vitest's console interception can deadlock the Workers pool when a
+    42	            // handler logs during a file's last RPC (cloudflare/workers-sdk#15719).
+    43	            disableConsoleIntercept: true,
+    44	            setupFiles: ["./test/setup/apply-migrations.ts"],
+    45	        },
+    46	    };
+    47	});
+===== tsconfig.base.json =====
+MISSING
+===== shared/client-ip.ts =====
+     1	import type { Context } from "hono";
+     2	
+     3	/** The visitor IP that Cloudflare saw. Clients cannot set CF-Connecting-IP. */
+     4	export function getRealClientIp(c: Context): string {
+     5	    return c.req.header("cf-connecting-ip") || "unknown";
+     6	}
+     7	
+     8	/** Lowercase, zero-padded hex encoding of a byte buffer. */
+     9	export function bytesToHex(bytes: ArrayBuffer): string {
+    10	    return Array.from(new Uint8Array(bytes))
+    11	        .map((byte) => byte.toString(16).padStart(2, "0"))
+    12	        .join("");
+    13	}
+    14	
+    15	/** Salted SHA-256 hash of the full IP — irreversible without the salt. */
+    16	export async function hashIp(
+    17	    ip: string | undefined,
+    18	    salt: string,
+    19	): Promise<string | undefined> {
+    20	    if (!ip) return undefined;
+    21	    const data = new TextEncoder().encode(`${salt}:${ip}`);
+    22	    return bytesToHex(await crypto.subtle.digest("SHA-256", data));
+    23	}
+    24	
+    25	/** Strip `::ffff:` prefix from IPv4-mapped IPv6 addresses. */
+    26	export function stripIPv4MappedPrefix(ip: string): string {
+    27	    const match = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    28	    return match ? match[1] : ip;
+    29	}
+    30	
+    31	/** Expand IPv6 `::` shorthand to full 8-group form. */
+    32	function expandIPv6(ip: string): string {
+    33	    if (!ip.includes("::")) {
+    34	        return ip
+    35	            .split(":")
+    36	            .map((group) => group.padStart(4, "0"))
+    37	            .join(":");
+    38	    }
+    39	    const halves = ip.split("::");
+    40	    const left = halves[0] ? halves[0].split(":") : [];
+    41	    const right = halves[1] ? halves[1].split(":") : [];
+    42	    const middle = Array(8 - left.length - right.length).fill("0000");
+    43	    return [...left, ...middle, ...right]
+    44	        .map((group) => group.padStart(4, "0"))
+    45	        .join(":");
+    46	}
+    47	
+    48	/** Truncate IP to /24 subnet (IPv4) or /48 subnet (IPv6, first 3 groups). */
+    49	export function truncateIpToSubnet(ip: string | undefined): string | undefined {
+    50	    if (!ip) return undefined;
+    51	    const normalized = stripIPv4MappedPrefix(ip);
+    52	    if (normalized.includes(".")) {
+    53	        const parts = normalized.split(".");
+    54	        if (parts.length === 4) return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+    55	    }
+    56	    if (normalized.includes(":")) {
+    57	        const groups = expandIPv6(normalized).split(":");
+    58	        return `${groups[0]}:${groups[1]}:${groups[2]}::`;
+    59	    }
+    60	    return undefined;
+    61	}
+===== shared/rate-limit.ts =====
+     1	import type { Context } from "hono";
+     2	import { createMiddleware } from "hono/factory";
+     3	import { HTTPException } from "hono/http-exception";
+     4	import { extractApiKey } from "./auth/api-key.ts";
+     5	import { bytesToHex, getRealClientIp } from "./client-ip.ts";
+     6	
+     7	type RateLimitEnv = {
+     8	    Bindings: {
+     9	        EDGE_RATE_LIMITER?: RateLimit;
+    10	        EDGE_IP_RATE_LIMITER?: RateLimit;
+    11	    };
+    12	};
+    13	
+    14	/**
+    15	 * Cloudflare-native limit that runs before auth, so one flooding key is
+    16	 * rejected without reaching D1. Counts per API key, hashed so no lookup is
+    17	 * needed. With `byIp`, requests without a key count per client IP instead,
+    18	 * and keyed requests also count per IP in `EDGE_IP_RATE_LIMITER`, so
+    19	 * rotating made-up keys from one IP cannot dodge the limit. Each Worker's
+    20	 * wrangler.toml sets its limits per 10 seconds, matching `Retry-After`.
+    21	 * Enter leaves `byIp` off because gen's internal calls arrive without a
+    22	 * client IP; it still counts every request that carries a client IP, keyed
+    23	 * or not, so public routes such as device codes, app lookup and sign-in
+    24	 * cannot be flooded into D1 with made-up keys. Cloudflare counts per
+    25	 * location, so this caps floods rather than enforcing an exact quota.
+    26	 */
+    27	export function rateLimit({ byIp }: { byIp: boolean }) {
+    28	    return createMiddleware<RateLimitEnv>(async (c, next) => {
+    29	        const apiKey = extractApiKey(c.req.raw);
+    30	        const ip = `ip:${getRealClientIp(c)}`;
+    31	        if (apiKey) {
+    32	            const digest = await crypto.subtle.digest(
+    33	                "SHA-256",
+    34	                new TextEncoder().encode(apiKey),
+    35	            );
+    36	            await limit(
+    37	                c,
+    38	                c.env.EDGE_RATE_LIMITER,
+    39	                `key:${bytesToHex(digest)}`,
+    40	            );
+    41	            if (byIp) await limit(c, c.env.EDGE_IP_RATE_LIMITER, ip);
+    42	        } else if (byIp) {
+    43	            await limit(c, c.env.EDGE_RATE_LIMITER, ip);
+    44	        }
+    45	        if (!byIp && c.req.header("cf-connecting-ip")) {
+    46	            await limit(c, c.env.EDGE_RATE_LIMITER, ip);
+    47	        }
+    48	        await next();
+    49	    });
+    50	}
+    51	
+    52	/** A 429 once `key` is over `limiter`; `retryAfter` is its period in seconds. */
+    53	export async function limit(
+    54	    c: Context,
+    55	    limiter: RateLimit | undefined,
+    56	    key: string,
+    57	    retryAfter = 10,
+    58	) {
+    59	    if (limiter && !(await limiter.limit({ key })).success) {
+    60	        c.header("Retry-After", String(retryAfter));
+    61	        throw new HTTPException(429, {
+    62	            message: "Too many requests. Please slow down.",
+    63	        });
+    64	    }
+    65	}
+===== shared/cache.ts =====
+     1	import type { Logger } from "@logtape/logtape";
+     2	
+     3	interface CacheOptions<TArgs extends unknown[]> {
+     4	    log: Logger;
+     5	    ttl: number;
+     6	    kv: KVNamespace;
+     7	    keyGenerator: (...args: TArgs) => string | Promise<string>;
+     8	}
+     9	
+    10	interface CacheEntry<T> {
+    11	    value: T;
+    12	    ttl: number;
+    13	}
+    14	
+    15	/**
+    16	 * Creates a cached version of an async function using Cloudflare KV
+    17	 * @param fn The async function to cache
+    18	 * @param options Cache configuration options
+    19	 * @returns A cached version of the function
+    20	 */
+    21	export function cached<TArgs extends unknown[], TReturn>(
+    22	    fn: (...args: TArgs) => Promise<TReturn>,
+    23	    options: CacheOptions<TArgs>,
+    24	): (...args: TArgs) => Promise<TReturn> {
+    25	    const { ttl, kv, keyGenerator, log } = options;
+    26	
+    27	    return async (...args: TArgs): Promise<TReturn> => {
+    28	        const cacheKey = await keyGenerator(...args);
+    29	
+    30	        try {
+    31	            log.trace("Fetching from cache: {key}", { key: cacheKey });
+    32	            const cachedData = (await kv.get(
+    33	                cacheKey,
+    34	                "json",
+    35	            )) as CacheEntry<TReturn> | null;
+    36	            if (cachedData) {
+    37	                const ttlChanged = cachedData.ttl !== ttl;
+    38	                if (!ttlChanged) {
+    39	                    return cachedData.value;
+    40	                }
+    41	            }
+    42	        } catch (error) {
+    43	            log.warn("Failed to read from cache: {error}", { error });
+    44	        }
+    45	
+    46	        log.trace("Executing function: {key}", { key: cacheKey });
+    47	        const result = await fn(...args);
+    48	
+    49	        try {
+    50	            log.trace("Writing to cache: {key}", { key: cacheKey });
+    51	            const cacheEntry: CacheEntry<TReturn> = {
+    52	                value: result,
+    53	                ttl,
+    54	            };
+    55	            await kv.put(cacheKey, JSON.stringify(cacheEntry), {
+    56	                expirationTtl: ttl,
+    57	            });
+    58	        } catch (error) {
+    59	            log.warn("Failed to write to cache: {error}", { error });
+    60	        }
+    61	
+    62	        return result;
+    63	    };
+    64	}
+===== shared/auth/redirect-uri.ts =====
+     1	/**
+     2	 * Match an incoming `redirect_uri` against a registered allowlist for a `pk_`.
+     3	 *
+     4	 * Scheme policy (https-only except loopback http) is enforced at registration
+     5	 * time (see validateRedirectUriFormat). Matching trusts the stored allowlist
+     6	 * and does not re-check the scheme.
+     7	 *
+     8	 * Comparison rules:
+     9	 * - Scheme + hostname + path are matched exactly (after lowercasing host).
+    10	 * - Trailing slash on the path is insignificant: `/cb` and `/cb/` match.
+    11	 * - Query strings are ignored when the registered URI has no query: apps
+    12	 *   round-trip state (e.g. `?prompt=...`) and the auth code/token rides the URL
+    13	 *   fragment, not the query. If the registered URI includes a query, it must
+    14	 *   match exactly so existing query-bound allowlist entries are not broadened.
+    15	 * - For loopback entries (RFC 8252 §7.3): port is ignored — any port matches.
+    16	 *   This covers native/CLI apps that bind to ephemeral ports each run.
+    17	 * - For non-loopback entries: port must match (default ports normalized).
+    18	 * - Fragments are rejected; redirect URIs must not contain them.
+    19	 *
+    20	 * Returns false on any parse error or empty allowlist.
+    21	 *
+    22	 * Single source of truth for both /api/app-lookup (consent screen attribution)
+    23	 * and createApiKeyForUser (sk_ minting). Keep them aligned.
+    24	 */
+    25	export function redirectUriMatchesAllowlist(
+    26	    uri: string,
+    27	    allowlist: readonly string[] | null | undefined,
+    28	): boolean {
+    29	    if (!allowlist?.length) return false;
+    30	    const incoming = safeParse(uri);
+    31	    if (!incoming) return false;
+    32	    return allowlist.some((entry) => matchesEntry(incoming, entry));
+    33	}
+    34	
+    35	/**
+    36	 * Strict variant for the OAuth authorization-code flow (RFC 6749 §3.1.2.3):
+    37	 * the authorization code rides the redirect query string, so the fragment-era
+    38	 * leniency of accepting extra query params must not apply. The query must
+    39	 * equal the registered entry's exactly (normally: both absent). Loopback
+    40	 * ports stay port-agnostic (RFC 8252 §7.3) and one trailing slash is still
+    41	 * ignored. The legacy fragment flow keeps the lenient matcher above.
+    42	 */
+    43	export function redirectUriMatchesAllowlistExact(
+    44	    uri: string,
+    45	    allowlist: readonly string[] | null | undefined,
+    46	): boolean {
+    47	    if (!allowlist?.length) return false;
+    48	    const incoming = safeParse(uri);
+    49	    if (!incoming) return false;
+    50	    return allowlist.some((entry) => matchesEntry(incoming, entry, true));
+    51	}
+    52	
+    53	// Schemes the browser handles itself. Sending the consent page to one would
+    54	// load or run it on this page instead of handing the result back to an app.
+    55	const BROWSER_SCHEMES = new Set([
+    56	    "javascript:",
+    57	    "data:",
+    58	    "vbscript:",
+    59	    "file:",
+    60	    "blob:",
+    61	    "about:",
+    62	    "filesystem:",
+    63	]);
+    64	
+    65	/**
+    66	 * Parse the redirect target of the consent screen: a website, a loopback
+    67	 * server or a native app's own scheme (e.g. `myapp://callback`). Null when the
+    68	 * URL is unparseable or uses a scheme the browser handles itself, so such a
+    69	 * target never reaches window.location. The URL parser normalizes the scheme,
+    70	 * and callers navigate to the parsed URL, so case or whitespace tricks in the
+    71	 * raw string cannot slip past the check.
+    72	 */
+    73	export function parseAuthorizeRedirectUrl(url: string): URL | null {
+    74	    const parsed = safeParse(url);
+    75	    return parsed && !BROWSER_SCHEMES.has(parsed.protocol) ? parsed : null;
+    76	}
+    77	
+    78	export function isAllowedRedirectUrl(url: URL): boolean {
+    79	    if (url.protocol === "https:") return true;
+    80	    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+    81	}
+    82	
+    83	export function isLoopbackHostname(hostname: string): boolean {
+    84	    const h = normalizeHostname(hostname);
+    85	    if (h === "localhost" || h === "0.0.0.0" || h === "::1") return true;
+    86	    if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+    87	    return false;
+    88	}
+    89	
+    90	function safeParse(url: string): URL | null {
+    91	    try {
+    92	        return new URL(url);
+    93	    } catch {
+    94	        return null;
+    95	    }
+    96	}
+    97	
+    98	function normalizeHostname(hostname: string): string {
+    99	    return hostname
+   100	        .toLowerCase()
+   101	        .replace(/^\[(.*)\]$/, "$1")
+   102	        .replace(/\.$/, "");
+   103	}
+   104	
+   105	function normalizePathname(pathname: string): string {
+   106	    return pathname.length > 1 && pathname.endsWith("/")
+   107	        ? pathname.slice(0, -1)
+   108	        : pathname;
+   109	}
+   110	
+   111	function matchesEntry(
+   112	    incoming: URL,
+   113	    entryUrl: string,
+   114	    exactQuery = false,
+   115	): boolean {
+   116	    const entry = safeParse(entryUrl);
+   117	    if (!entry) return false;
+   118	    if (incoming.hash || entry.hash) return false;
+   119	    if (incoming.protocol !== entry.protocol) return false;
+   120	    if (
+   121	        normalizeHostname(incoming.hostname) !==
+   122	        normalizeHostname(entry.hostname)
+   123	    ) {
+   124	        return false;
+   125	    }
+   126	    if (
+   127	        normalizePathname(incoming.pathname) !==
+   128	        normalizePathname(entry.pathname)
+   129	    ) {
+   130	        return false;
+   131	    }
+   132	    if (exactQuery) {
+   133	        if (incoming.search !== entry.search) return false;
+   134	    } else if (entry.search && incoming.search !== entry.search) {
+   135	        return false;
+   136	    }
+   137	    if (isLoopbackHostname(entry.hostname)) return true;
+   138	    return incoming.port === entry.port;
+   139	}
+===== shared/secret-encryption.ts =====
+     1	const VERSION = "v1";
+     2	
+     3	export async function encryptSecret(
+     4	    plaintext: string,
+     5	    secret: string,
+     6	): Promise<string> {
+     7	    const iv = crypto.getRandomValues(new Uint8Array(12));
+     8	    const key = await deriveKey(secret);
+     9	    const ciphertext = new Uint8Array(
+    10	        await crypto.subtle.encrypt(
+    11	            { name: "AES-GCM", iv },
+    12	            key,
+    13	            new TextEncoder().encode(plaintext),
+    14	        ),
+    15	    );
+    16	    return `${VERSION}:${bytesToBase64(iv)}:${bytesToBase64(ciphertext)}`;
+    17	}
+    18	
+    19	export async function decryptSecret(
+    20	    encrypted: string,
+    21	    secret: string,
+    22	): Promise<string> {
+    23	    const [version, ivBase64, ciphertextBase64] = encrypted.split(":");
+    24	    if (version !== VERSION || !ivBase64 || !ciphertextBase64) {
+    25	        throw new Error("Unsupported encrypted secret format");
+    26	    }
+    27	    const key = await deriveKey(secret);
+    28	    const plaintext = await crypto.subtle.decrypt(
+    29	        { name: "AES-GCM", iv: base64ToBytes(ivBase64) },
+    30	        key,
+    31	        base64ToBytes(ciphertextBase64),
+    32	    );
+    33	    return new TextDecoder().decode(plaintext);
+    34	}
+    35	
+    36	async function deriveKey(secret: string): Promise<CryptoKey> {
+    37	    const digest = await crypto.subtle.digest(
+    38	        "SHA-256",
+    39	        new TextEncoder().encode(secret),
+    40	    );
+    41	    return crypto.subtle.importKey("raw", digest, "AES-GCM", false, [
+    42	        "encrypt",
+    43	        "decrypt",
+    44	    ]);
+    45	}
+    46	
+    47	function bytesToBase64(bytes: Uint8Array): string {
+    48	    let binary = "";
+    49	    for (const byte of bytes) binary += String.fromCharCode(byte);
+    50	    return btoa(binary);
+    51	}
+    52	
+    53	function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
+    54	    const binary = atob(value);
+    55	    const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+    56	    for (let i = 0; i < binary.length; i += 1) {
+    57	        bytes[i] = binary.charCodeAt(i);
+    58	    }
+    59	    return bytes;
+    60	}
+===== shared/user-media-url.ts =====
+     1	export type UserMediaUrlValidation =
+     2	    | { ok: true; url: URL }
+     3	    | { ok: false; reason: "invalid" | "protocol" | "private" };
+     4	
+     5	const BLOCKED_HOSTNAMES = /^localhost$/i;
+     6	
+     7	function isBlockedUserMediaHost(hostname: string): boolean {
+     8	    const host = hostname.replace(/^\[|\]$/g, "");
+     9	    const normalized = host.toLowerCase();
+    10	    if (
+    11	        BLOCKED_HOSTNAMES.test(normalized) ||
+    12	        normalized.endsWith(".localhost")
+    13	    ) {
+    14	        return true;
+    15	    }
+    16	
+    17	    if (normalized.includes(":")) return true;
+    18	
+    19	    const parts = normalized.split(".").map(Number);
+    20	    return (
+    21	        parts.length === 4 &&
+    22	        parts.every(
+    23	            (part) => Number.isInteger(part) && part >= 0 && part <= 255,
+    24	        )
+    25	    );
+    26	}
+    27	
+    28	/**
+    29	 * Apply the same URL policy to every user-supplied media fetch: HTTP(S) only,
+    30	 * with credentialed hosts, loopback names, and literal IP addresses refused.
+    31	 */
+    32	export function validateUserMediaUrl(value: string): UserMediaUrlValidation {
+    33	    let url: URL;
+    34	    try {
+    35	        url = new URL(value);
+    36	    } catch {
+    37	        return { ok: false, reason: "invalid" };
+    38	    }
+    39	
+    40	    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    41	        return { ok: false, reason: "protocol" };
+    42	    }
+    43	
+    44	    if (url.username || url.password || isBlockedUserMediaHost(url.hostname)) {
+    45	        return { ok: false, reason: "private" };
+    46	    }
+    47	
+    48	    return { ok: true, url };
+    49	}
