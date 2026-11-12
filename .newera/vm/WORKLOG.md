@@ -31,3 +31,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T12:12:00.496Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== TODO.md ====='; cat TODO.md; echo; echo '===== notes tree ====='; find n
 - [2026-11-12T12:13:59.929Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && echo '=== enter vitest.config ==='; cat enter.pollinations.ai/
 - [2026-11-12T12:32:07.397Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== git status ==='; git status --short | head -30; echo '=== gitignore ==='; 
+- [2026-11-12T12:33:32.192Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p scripts poc/enter poc/gen evidence research && cat > scripts/run-pocs.sh <<
