@@ -4,7 +4,8 @@ import { validateUserMediaUrl } from "@shared/user-media-url.ts";
 import { validateCommunityEndpointUrl } from "@shared/community-endpoint-urls.ts";
 
 // Every one of these strings is a loopback address in disguise.
-// They must be refused by the SSRF filters; the PoC proves they are NOT.
+// The PoC asserts the ACTUAL upstream behaviour: the SSRF filter ACCEPTS them
+// (result.ok === true), i.e. the defect is real and reproducible.
 const LOOPBACK_ENCODINGS = [
   "http://2130706433/a.png", // decimal 32-bit form of 127.0.0.1
   "http://0x7f000001/a.png", // hex form of 127.0.0.1
@@ -18,7 +19,7 @@ async function resolvesToLoopback(hostname: string): Promise<string[]> {
   return records.map((r) => r.address);
 }
 
-describe("SSRF blocklist bypass - shared/user-media-url.ts", () => {
+describe("SSRF blocklist bypass - shared/user-media-url.ts (VULNERABLE upstream)", () => {
   for (const value of LOOPBACK_ENCODINGS) {
     it(`filter ACCEPTS loopback-in-disguise ${value}`, async () => {
       const result = validateUserMediaUrl(value);
@@ -27,19 +28,20 @@ describe("SSRF blocklist bypass - shared/user-media-url.ts", () => {
       console.log(
         `[user-media-url] ${value} -> allowed=${result.ok} host=${host} resolves=${addresses.join(",")}`,
       );
-      // The validator is supposed to refuse private/loopback hosts.
-      expect(result.ok).toBe(false);
+      // Defect: the validator ALLOWS a host that resolves to loopback.
+      expect(result.ok).toBe(true);
+      expect(addresses.some((a) => a === "127.0.0.1" || a === "::1")).toBe(true);
     });
   }
 });
 
-describe("SSRF blocklist bypass - shared/community-endpoint-urls.ts", () => {
+describe("NEGATIVE CONTROL - shared/community-endpoint-urls.ts blocks the same encodings", () => {
   for (const value of [
     "https://2130706433/v1/chat/completions",
     "https://0x7f000001/v1/chat/completions",
     "https://127.1/v1/chat/completions",
   ]) {
-    it(`filter ACCEPTS loopback-in-disguise ${value}`, async () => {
+    it(`filter REFUSES loopback-in-disguise ${value}`, async () => {
       const host = new URL(value).hostname;
       const addresses = await resolvesToLoopback(host);
       console.log(
