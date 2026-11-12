@@ -21,3 +21,5 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T11:31:27.870Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && npx vitest run --reporter=basic 2>&1 | tail -30
 - [2026-11-12T11:44:46.027Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/enter.pollinations.ai && cat vitest.config.ts 2>/dev/null; echo '
 - [2026-11-12T11:49:59.620Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/enter.pollinations.ai && timeout 300 npx vitest run test/integrat
+- [2026-11-12T11:54:40.170Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/enter.pollinations.ai && timeout 420 npx vitest run test/integrat
+- [2026-11-12T11:55:05.424Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && node -e "console.log('vitest',require('vitest/package.json').v
