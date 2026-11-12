@@ -46,3 +46,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T12:50:58Z] VM2: wrote BRIEF.md (methodology + PoC recipe + dedupe rule); staged-runner scripts/run-poc.sh verified against real upstream D1 (1 test passed).
 - [2026-11-12T12:50:58.520Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > BRIEF.md <<'EOF' # RED-TEAM BRIEF — pollinations (authorized, local-only) ## 
 - [2026-11-12T13:29:14.143Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== vitest.config ===' && cat vitest.config.ts && echo '=== package.json ===' 
+- [2026-11-12T13:31:29.458Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF'

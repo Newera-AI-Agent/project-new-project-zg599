@@ -1,0 +1,57 @@
+
+ RUN  v2.1.9 /home/runner/work/project-new-project-zg599/project-new-project-zg599
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://2130706433/a.png
+[user-media-url] http://2130706433/a.png -> allowed=false host=127.0.0.1 resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://0x7f000001/a.png
+[user-media-url] http://0x7f000001/a.png -> allowed=false host=127.0.0.1 resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://127.1/a.png
+[user-media-url] http://127.1/a.png -> allowed=false host=127.0.0.1 resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://localhost./a.png
+[user-media-url] http://localhost./a.png -> allowed=true host=localhost. resolves=::1,127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://127.0.0.1./a.png
+[user-media-url] http://127.0.0.1./a.png -> allowed=false host=127.0.0.1 resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/community-endpoint-urls.ts > filter ACCEPTS loopback-in-disguise https://2130706433/v1/chat/completions
+[community-endpoint-urls] https://2130706433/v1/chat/completions -> resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/community-endpoint-urls.ts > filter ACCEPTS loopback-in-disguise https://0x7f000001/v1/chat/completions
+[community-endpoint-urls] https://0x7f000001/v1/chat/completions -> resolves=127.0.0.1
+
+stdout | poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/community-endpoint-urls.ts > filter ACCEPTS loopback-in-disguise https://127.1/v1/chat/completions
+[community-endpoint-urls] https://127.1/v1/chat/completions -> resolves=127.0.0.1
+
+ ❯ poc/ssrf/url-filter-bypass.test.ts (8 tests | 1 failed) 20ms
+   × SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://localhost./a.png 13ms
+     → expected true to be false // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  poc/ssrf/url-filter-bypass.test.ts > SSRF blocklist bypass - shared/user-media-url.ts > filter ACCEPTS loopback-in-disguise http://localhost./a.png
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ poc/ssrf/url-filter-bypass.test.ts:31:25
+     29|       );
+     30|       // The validator is supposed to refuse private/loopback hosts.
+     31|       expect(result.ok).toBe(false);
+       |                         ^
+     32|     });
+     33|   }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 7 passed (8)
+   Start at  13:31:29
+   Duration  336ms (transform 47ms, setup 0ms, collect 44ms, tests 20ms, environment 0ms, prepare 61ms)
+
