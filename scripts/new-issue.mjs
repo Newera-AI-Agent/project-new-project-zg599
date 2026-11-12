@@ -96,9 +96,13 @@ ${remediation}
 ${dedupe}${negLines}
 `;
 
-const outPath = resolve(`findings/${area}/${slug}.md`);
+const outPath = resolve(spec.out || `issue${spec.index}.md`);
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, md);
+// keep a copy of the narrative under findings/<area>/ for traceability
+const mirror = resolve(`findings/${area}/${slug}.md`);
+mkdirSync(dirname(mirror), { recursive: true });
+writeFileSync(mirror, md);
 
 const logPath = resolve(`research/${area}-log.md`);
 mkdirSync(dirname(logPath), { recursive: true });
