@@ -56,3 +56,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T13:39:38.028Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '--- upstream install tail ---' && tail -3 /tmp/upstream-install.log && ls -d u
 - [2026-11-12T13:41:51.422Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > scripts/verify.sh <<'SH' #!/usr/bin/env bash # Verify a PoC against the REAL u
 - [2026-11-12T13:44:06.262Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p work research findings && cat > work/agent-brief.md <<'MD' # SHARED RED-TEA
+- [2026-11-12T13:48:14.381Z | VM 2/3] PLAN updated: 32 steps
