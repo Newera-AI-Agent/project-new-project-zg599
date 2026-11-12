@@ -37,3 +37,6 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T12:37:37.965Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p .newera/cyber/engagement/evidence && cat > .newera/cyber/scope.json <<'EOF'
 - [2026-11-12T12:40:26.898Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/media.pollinations.ai && ls src && echo '=== test dir ===' && ls 
 - [2026-11-12T12:41:49.735Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat package.json && echo '=== vitest.config ===' && cat vitest.config.ts && echo '==
+- [2026-11-12T12:42:40.918Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat poc/smoke.test.ts && echo '=== run root suite ===' && timeout 300 npx vitest run
+- [2026-11-12T12:43:12.666Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && for w in gen.pollinations.ai enter.pollinations.ai media.polli
+- [2026-11-12T12:44:31.988Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== root vitest.config.ts ==='; cat vitest.config.ts; echo '=== root package.j
