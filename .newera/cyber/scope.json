@@ -1,0 +1,8 @@
+{
+  "targets": [
+    "file:///home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations",
+    "http://127.0.0.1:*",
+    "http://localhost:*"
+  ],
+  "notes": "Authorized scope is the LOCAL CHECKOUT of github.com/pollinations/pollinations (MIT) cloned into upstream/pollinations, plus loopback-only test servers started by the agent. No scanning, probing or exploitation of production pollinations.ai / media.pollinations.ai / gen.pollinations.ai endpoints. PoCs execute upstream source code locally against stubbed D1/R2/KV and loopback servers. Findings are reported as files in this report repo; no PR is opened against the upstream official repository."
+}
