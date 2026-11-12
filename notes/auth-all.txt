@@ -1,0 +1,1559 @@
+===== shared/auth/api-key.ts =====
+     1	import { apiKey, defaultKeyHasher } from "@better-auth/api-key";
+     2	import { betterAuth } from "better-auth";
+     3	import { drizzleAdapter } from "better-auth/adapters/drizzle";
+     4	import {
+     5	    and,
+     6	    eq,
+     7	    getTableColumns,
+     8	    isNull,
+     9	    lt,
+    10	    or,
+    11	    type SQL,
+    12	} from "drizzle-orm";
+    13	import { drizzle } from "drizzle-orm/d1";
+    14	import { alias } from "drizzle-orm/sqlite-core";
+    15	import { HTTPException } from "hono/http-exception";
+    16	import { byopClientAllowsMarkup } from "../billing/markup.ts";
+    17	import * as schema from "../db/better-auth.ts";
+    18	import {
+    19	    AGENT_RUN_TOKEN_PREFIX,
+    20	    type AgentRunClaims,
+    21	    verifyAgentRunToken,
+    22	} from "./agent-run-token.ts";
+    23	import { parseMetadata } from "./api-key-metadata.ts";
+    24	import { isUserBanned } from "./ban.ts";
+    25	import { parseGithubIdList } from "./github-id-list.ts";
+    26	import { SESSION_TOKEN_PREFIX, verifySessionToken } from "./session-token.ts";
+    27	
+    28	const PUBLISHABLE_KEY_PREFIX = "pk";
+    29	const PUBLISHABLE_KEY_REFUSAL =
+    30	    "Publishable keys (pk_) only identify your app and can't authenticate requests. Let users pay through Pollinations Pay: https://gen.pollinations.ai/docs#tag/pollinations-pay. On a server, use a secret key (sk_) from https://enter.pollinations.ai/keys.";
+    31	
+    32	export type AuthUser = typeof schema.user.$inferSelect;
+    33	
+    34	export interface AuthenticatedApiKey {
+    35	    id: string;
+    36	    name?: string;
+    37	    permissions?: Record<string, string[]>;
+    38	    metadata?: Record<string, unknown>;
+    39	    pollenBalance?: number | null;
+    40	    expiresAt?: Date | null;
+    41	    /** Charges never fall through to the owner's paid balance. */
+    42	    questPollenOnly?: boolean;
+    43	    byopClientKeyId?: string | null;
+    44	    byopClientName?: string | null;
+    45	    byopClientUserId?: string | null;
+    46	    /** True when deduction will add BYOP markup. Set at auth so preflight matches. */
+    47	    byopMarkupApplies?: boolean;
+    48	    rawKey?: string;
+    49	}
+    50	
+    51	export interface ApiKeyAuthResult {
+    52	    user?: AuthUser;
+    53	    /** Absent for a session token: the account owner, with no key restrictions. */
+    54	    apiKey?: AuthenticatedApiKey;
+    55	    rawApiKey: string;
+    56	    agentRun?: AgentRunClaims;
+    57	}
+    58	
+    59	export interface ApiKeyAuthBindings {
+    60	    DB: D1Database;
+    61	    ENVIRONMENT?: string;
+    62	    STAGING_ALLOWED_GITHUB_IDS?: string;
+    63	    STAGING_ALLOWED_EMAILS?: string;
+    64	    BETTER_AUTH_SECRET?: string;
+    65	}
+    66	
+    67	export class BannedAccountError extends Error {
+    68	    constructor(message = "Account banned") {
+    69	        super(message);
+    70	        this.name = "BannedAccountError";
+    71	    }
+    72	}
+    73	
+    74	export class StagingAccessDeniedError extends Error {
+    75	    constructor() {
+    76	        super("staging is invite-only");
+    77	        this.name = "StagingAccessDeniedError";
+    78	    }
+    79	}
+    80	
+    81	/**
+    82	 * Throws StagingAccessDeniedError if the env is staging and the user is not in
+    83	 * either staging allowlist. No-op outside staging.
+    84	 * Fails closed: a missing user or empty/missing allowlists deny access.
+    85	 *
+    86	 * Called at request-time (every API-key or session-cookie request) to defend
+    87	 * against pre-existing sessions/keys that predate the lockdown. See #11137.
+    88	 */
+    89	export function assertStagingAccess(
+    90	    env: {
+    91	        ENVIRONMENT?: string;
+    92	        STAGING_ALLOWED_GITHUB_IDS?: string;
+    93	        STAGING_ALLOWED_EMAILS?: string;
+    94	    },
+    95	    user:
+    96	        | { githubId?: number | null; email?: string | null }
+    97	        | null
+    98	        | undefined,
+    99	): void {
+   100	    if (env.ENVIRONMENT !== "staging") return;
+   101	    const allowedGithubIds = parseGithubIdList(env.STAGING_ALLOWED_GITHUB_IDS);
+   102	    const allowedEmails = parseEmailList(env.STAGING_ALLOWED_EMAILS);
+   103	    const ghId = user?.githubId;
+   104	    const email = normalizeEmail(user?.email);
+   105	    if (
+   106	        (!ghId || !allowedGithubIds.has(Number(ghId))) &&
+   107	        (!email || !allowedEmails.has(email))
+   108	    ) {
+   109	        throw new StagingAccessDeniedError();
+   110	    }
+   111	}
+   112	
+   113	export function parseEmailList(raw: string | undefined | null): Set<string> {
+   114	    if (!raw) return new Set();
+   115	    const emails = new Set<string>();
+   116	    for (const part of raw.split(",")) {
+   117	        const normalized = normalizeEmail(part);
+   118	        if (normalized) emails.add(normalized);
+   119	    }
+   120	    return emails;
+   121	}
+   122	
+   123	function normalizeEmail(value: string | null | undefined): string | null {
+   124	    const normalized = value?.trim().toLowerCase();
+   125	    return normalized?.includes("@") ? normalized : null;
+   126	}
+   127	
+   128	export function createApiKeyPlugin() {
+   129	    return apiKey({
+   130	        enableMetadata: true,
+   131	        deferUpdates: true,
+   132	        defaultPrefix: PUBLISHABLE_KEY_PREFIX,
+   133	        defaultKeyLength: 16,
+   134	        minimumNameLength: 1,
+   135	        maximumNameLength: 253,
+   136	        startingCharactersConfig: {
+   137	            charactersLength: 10,
+   138	        },
+   139	        customKeyGenerator: (options: {
+   140	            length: number;
+   141	            prefix: string | undefined;
+   142	        }) => {
+   143	            const isPublishable = options.prefix === PUBLISHABLE_KEY_PREFIX;
+   144	            const keyLength = isPublishable ? 16 : 32;
+   145	            const chars =
+   146	                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+   147	            const randomBytes = crypto.getRandomValues(
+   148	                new Uint8Array(keyLength),
+   149	            );
+   150	            const key = Array.from(
+   151	                randomBytes,
+   152	                (byte) => chars[byte % chars.length],
+   153	            ).join("");
+   154	            return options.prefix ? `${options.prefix}_${key}` : key;
+   155	        },
+   156	        keyExpiration: {
+   157	            minExpiresIn: 0,
+   158	            // Override Better Auth's 365-day default with JavaScript Date's range.
+   159	            maxExpiresIn: 100_000_000,
+   160	        },
+   161	        rateLimit: {
+   162	            enabled: false,
+   163	        },
+   164	    });
+   165	}
+   166	
+   167	export function createApiKeyAuth(
+   168	    env: ApiKeyAuthBindings,
+   169	    ctx?: Pick<ExecutionContext, "waitUntil">,
+   170	) {
+   171	    const db = drizzle(env.DB);
+   172	    return betterAuth({
+   173	        basePath: "/api/auth",
+   174	        database: drizzleAdapter(db, {
+   175	            schema,
+   176	            provider: "sqlite",
+   177	        }),
+   178	        advanced: {
+   179	            backgroundTasks: ctx
+   180	                ? {
+   181	                      handler: (promise: Promise<unknown>) => {
+   182	                          ctx.waitUntil(promise.catch(() => undefined));
+   183	                      },
+   184	                  }
+   185	                : undefined,
+   186	        },
+   187	        plugins: [createApiKeyPlugin()],
+   188	        telemetry: { enabled: false },
+   189	    });
+   190	}
+   191	
+   192	export function extractApiKey(request: Request): string | null {
+   193	    const auth = request.headers.get("authorization");
+   194	    const match = auth?.match(/^Bearer (.+)$/);
+   195	    if (match?.[1]) return match[1];
+   196	
+   197	    // E2B's SDKs send the key in X-API-KEY.
+   198	    const headerKey = request.headers.get("x-api-key");
+   199	    if (headerKey) return headerKey;
+   200	
+   201	    // Query keys end up in access logs, referrers and browser history. Their
+   202	    // owner can rotate them; agent run and session tokens cannot be revoked,
+   203	    // so they are Bearer-only.
+   204	    const queryKey = new URL(request.url).searchParams.get("key");
+   205	    return queryKey?.startsWith(AGENT_RUN_TOKEN_PREFIX) ||
+   206	        queryKey?.startsWith(SESSION_TOKEN_PREFIX)
+   207	        ? null
+   208	        : queryKey;
+   209	}
+   210	
+   211	export function assertNotBanned(user: {
+   212	    banned?: boolean | null;
+   213	    banExpires?: Date | string | null;
+   214	    banReason?: string | null;
+   215	}): void {
+   216	    if (!isUserBanned(user)) return;
+   217	    throw new BannedAccountError(
+   218	        user.banReason ? `Account banned: ${user.banReason}` : "Account banned",
+   219	    );
+   220	}
+   221	
+   222	// A key that is unknown, disabled or expired stays rejected from the cache for
+   223	// this long, so a flood repeating bad keys stops reaching D1.
+   224	const INVALID_KEY_CACHE_SECONDS = 300;
+   225	// "Last used" is shown to the owner; minute precision is not needed, and a
+   226	// write per request was most of D1's load during the 2026-10-27 floods.
+   227	const LAST_REQUEST_WRITE_INTERVAL_MS = 5 * 60_000;
+   228	
+   229	export async function authenticateApiKeyRequest(opts: {
+   230	    request: Request;
+   231	    env: ApiKeyAuthBindings;
+   232	    ctx?: Pick<ExecutionContext, "waitUntil">;
+   233	}): Promise<ApiKeyAuthResult | null> {
+   234	    const rawApiKey = extractApiKey(opts.request);
+   235	    if (!rawApiKey) return null;
+   236	
+   237	    // pk_ keys are App Keys: public OAuth client IDs, never credentials.
+   238	    if (rawApiKey.startsWith(`${PUBLISHABLE_KEY_PREFIX}_`)) {
+   239	        throw new HTTPException(401, { message: PUBLISHABLE_KEY_REFUSAL });
+   240	    }
+   241	
+   242	    if (rawApiKey.startsWith(AGENT_RUN_TOKEN_PREFIX)) {
+   243	        return authenticateAgentRunToken(rawApiKey, opts.env);
+   244	    }
+   245	    if (rawApiKey.startsWith(SESSION_TOKEN_PREFIX)) {
+   246	        return authenticateSessionToken(rawApiKey, opts.env);
+   247	    }
+   248	
+   249	    // Better Auth's verifyApiKey does this lookup plus two awaited writes per
+   250	    // call (last_request and updated_at). Our keys use none of its quota or
+   251	    // rate-limit features, so look the key up by hash directly.
+   252	    const keyHash = await defaultKeyHasher(rawApiKey);
+   253	    const invalidKeyCacheKey = new Request(
+   254	        new URL(`/__invalid-api-key/${keyHash}`, opts.request.url),
+   255	    );
+   256	    const invalidKeys = await caches.open("invalid-api-keys");
+   257	    if (await invalidKeys.match(invalidKeyCacheKey)) return null;
+   258	
+   259	    const row = await selectApiKeyRow(opts.env, eq(schema.apikey.key, keyHash));
+   260	    const result = toActiveAuthResult(row, rawApiKey, opts.env);
+   261	    if (!result || !row) {
+   262	        const remember = invalidKeys.put(
+   263	            invalidKeyCacheKey,
+   264	            new Response(null, {
+   265	                headers: {
+   266	                    "Cache-Control": `max-age=${INVALID_KEY_CACHE_SECONDS}`,
+   267	                },
+   268	            }),
+   269	        );
+   270	        runInBackground(remember, opts.ctx);
+   271	        return null;
+   272	    }
+   273	
+   274	    const lastRequest = row.apiKey.lastRequest;
+   275	    const staleBefore = new Date(Date.now() - LAST_REQUEST_WRITE_INTERVAL_MS);
+   276	    if (!lastRequest || lastRequest < staleBefore) {
+   277	        const touch = drizzle(opts.env.DB)
+   278	            .update(schema.apikey)
+   279	            .set({ lastRequest: new Date() })
+   280	            .where(
+   281	                and(
+   282	                    eq(schema.apikey.id, row.apiKey.id),
+   283	                    or(
+   284	                        isNull(schema.apikey.lastRequest),
+   285	                        lt(schema.apikey.lastRequest, staleBefore),
+   286	                    ),
+   287	                ),
+   288	            )
+   289	            .run();
+   290	        runInBackground(touch, opts.ctx);
+   291	    }
+   292	    return result;
+   293	}
+   294	
+   295	function runInBackground(
+   296	    promise: Promise<unknown>,
+   297	    ctx?: Pick<ExecutionContext, "waitUntil">,
+   298	): void {
+   299	    const settled = promise.catch(() => undefined);
+   300	    ctx?.waitUntil(settled);
+   301	}
+   302	
+   303	/**
+   304	 * The key row that a raw key hashes to, if it can be used: Better Auth's
+   305	 * verifyApiKey checks without its per-call writes.
+   306	 */
+   307	export async function findUsableApiKey(
+   308	    env: Pick<ApiKeyAuthBindings, "DB">,
+   309	    rawKey: string,
+   310	): Promise<typeof schema.apikey.$inferSelect | null> {
+   311	    const row = await drizzle(env.DB, { schema }).query.apikey.findFirst({
+   312	        where: eq(schema.apikey.key, await defaultKeyHasher(rawKey)),
+   313	    });
+   314	    if (!row || !isUsable(row)) return null;
+   315	    return row;
+   316	}
+   317	
+   318	function isUsable(key: {
+   319	    enabled: boolean | null;
+   320	    expiresAt: Date | null;
+   321	}): boolean {
+   322	    return (
+   323	        key.enabled !== false && !(key.expiresAt && key.expiresAt <= new Date())
+   324	    );
+   325	}
+   326	
+   327	async function authenticateAgentRunToken(
+   328	    rawToken: string,
+   329	    env: ApiKeyAuthBindings,
+   330	): Promise<ApiKeyAuthResult | null> {
+   331	    if (!env.BETTER_AUTH_SECRET) return null;
+   332	
+   333	    let claims: AgentRunClaims;
+   334	    try {
+   335	        claims = await verifyAgentRunToken(rawToken, env.BETTER_AUTH_SECRET);
+   336	    } catch {
+   337	        return null;
+   338	    }
+   339	
+   340	    const parent = await loadActiveApiKeyAuthResult({
+   341	        apiKeyId: claims.parentApiKeyId,
+   342	        rawApiKey: rawToken,
+   343	        env,
+   344	    });
+   345	    if (!parent) return null;
+   346	
+   347	    // Agent-run tokens leave our control. Keep the parent's generation limits,
+   348	    // but never let an agent manage the owner's account or keys.
+   349	    const models = parent.apiKey.permissions?.models;
+   350	    return {
+   351	        ...parent,
+   352	        apiKey: {
+   353	            ...parent.apiKey,
+   354	            permissions: models ? { models } : undefined,
+   355	        },
+   356	        agentRun: claims,
+   357	    };
+   358	}
+   359	
+   360	async function authenticateSessionToken(
+   361	    rawToken: string,
+   362	    env: ApiKeyAuthBindings,
+   363	): Promise<ApiKeyAuthResult | null> {
+   364	    if (!env.BETTER_AUTH_SECRET) return null;
+   365	
+   366	    let userId: string;
+   367	    try {
+   368	        userId = await verifySessionToken(rawToken, env.BETTER_AUTH_SECRET);
+   369	    } catch {
+   370	        return null;
+   371	    }
+   372	
+   373	    const user = await drizzle(env.DB)
+   374	        .select()
+   375	        .from(schema.user)
+   376	        .where(eq(schema.user.id, userId))
+   377	        .get();
+   378	    if (!user) return null;
+   379	
+   380	    assertNotBanned(user);
+   381	    assertStagingAccess(env, user);
+   382	    return { user, rawApiKey: rawToken };
+   383	}
+   384	
+   385	/**
+   386	 * Loads an active API key by ID after another credential has authenticated it.
+   387	 * This deliberately does not accept the parent key's raw value so delegated
+   388	 * credentials never need to contain or recover that secret.
+   389	 */
+   390	export async function loadActiveApiKeyAuthResult(opts: {
+   391	    apiKeyId: string;
+   392	    rawApiKey: string;
+   393	    env: ApiKeyAuthBindings;
+   394	}): Promise<(ApiKeyAuthResult & { apiKey: AuthenticatedApiKey }) | null> {
+   395	    const row = await selectApiKeyRow(
+   396	        opts.env,
+   397	        eq(schema.apikey.id, opts.apiKeyId),
+   398	    );
+   399	    return toActiveAuthResult(row, opts.rawApiKey, opts.env);
+   400	}
+   401	
+   402	type ApiKeyRow = Awaited<ReturnType<typeof selectApiKeyRow>>;
+   403	
+   404	async function selectApiKeyRow(env: ApiKeyAuthBindings, where: SQL) {
+   405	    const db = drizzle(env.DB, { schema });
+   406	    const byopClientKey = alias(schema.apikey, "byop_client_key");
+   407	    const byopOwner = alias(schema.user, "byop_owner");
+   408	    return db
+   409	        .select({
+   410	            apiKey: getTableColumns(schema.apikey),
+   411	            user: getTableColumns(schema.user),
+   412	            byopClientName: byopClientKey.name,
+   413	            byopOwner: {
+   414	                banned: byopOwner.banned,
+   415	                banExpires: byopOwner.banExpires,
+   416	            },
+   417	            byopClientUserId: byopClientKey.referenceId,
+   418	            byopClientPrefix: byopClientKey.prefix,
+   419	            byopClientEnabled: byopClientKey.enabled,
+   420	            byopClientExpiresAt: byopClientKey.expiresAt,
+   421	            byopClientMetadata: byopClientKey.metadata,
+   422	        })
+   423	        .from(schema.apikey)
+   424	        .innerJoin(schema.user, eq(schema.user.id, schema.apikey.referenceId))
+   425	        .leftJoin(
+   426	            byopClientKey,
+   427	            eq(byopClientKey.id, schema.apikey.byopClientKeyId),
+   428	        )
+   429	        .where(where)
+   430	        .leftJoin(byopOwner, eq(byopOwner.id, byopClientKey.referenceId))
+   431	        .get();
+   432	}
+   433	
+   434	function toActiveAuthResult(
+   435	    row: ApiKeyRow,
+   436	    rawApiKey: string,
+   437	    env: ApiKeyAuthBindings,
+   438	): (ApiKeyAuthResult & { apiKey: AuthenticatedApiKey }) | null {
+   439	    if (!row || !isUsable(row.apiKey)) return null;
+   440	    // The stored type, not the prefix: older App Keys look like plln_pk_….
+   441	    const metadata = normalizeMetadata(parseMetadata(row.apiKey.metadata));
+   442	    if (metadata?.keyType === "publishable") {
+   443	        throw new HTTPException(401, { message: PUBLISHABLE_KEY_REFUSAL });
+   444	    }
+   445	
+   446	    assertNotBanned(row.user);
+   447	    if (row.byopOwner) assertNotBanned(row.byopOwner);
+   448	    assertStagingAccess(env, row.user);
+   449	
+   450	    return {
+   451	        user: row.user,
+   452	        apiKey: {
+   453	            id: row.apiKey.id,
+   454	            name: row.apiKey.name ?? undefined,
+   455	            permissions: normalizePermissions(
+   456	                parseMetadata(row.apiKey.permissions),
+   457	            ),
+   458	            metadata,
+   459	            pollenBalance: row.apiKey.pollenBalance ?? null,
+   460	            expiresAt: row.apiKey.expiresAt,
+   461	            questPollenOnly: row.apiKey.questPollenOnly,
+   462	            byopClientKeyId: row.apiKey.byopClientKeyId ?? null,
+   463	            byopClientName: row.byopClientName ?? null,
+   464	            byopClientUserId: row.byopClientUserId ?? null,
+   465	            byopMarkupApplies: byopClientAllowsMarkup(
+   466	                {
+   467	                    userId: row.byopClientUserId,
+   468	                    prefix: row.byopClientPrefix,
+   469	                    enabled: row.byopClientEnabled,
+   470	                    expiresAt: row.byopClientExpiresAt,
+   471	                    metadata: row.byopClientMetadata,
+   472	                },
+   473	                row.user.id,
+   474	            ),
+   475	            rawKey: rawApiKey,
+   476	        },
+   477	        rawApiKey,
+   478	    };
+   479	}
+   480	
+   481	function normalizePermissions(
+   482	    value: unknown,
+   483	): Record<string, string[]> | undefined {
+   484	    if (!value || typeof value !== "object" || Array.isArray(value)) {
+   485	        return undefined;
+   486	    }
+   487	
+   488	    const permissions: Record<string, string[]> = {};
+   489	    for (const [key, scopes] of Object.entries(value)) {
+   490	        if (!Array.isArray(scopes)) continue;
+   491	        const safeScopes = scopes.filter(
+   492	            (scope): scope is string => typeof scope === "string",
+   493	        );
+   494	        if (safeScopes.length || key === "models") {
+   495	            permissions[key] = safeScopes;
+   496	        }
+   497	    }
+   498	    return Object.keys(permissions).length ? permissions : undefined;
+   499	}
+   500	
+   501	function normalizeMetadata(
+   502	    value: unknown,
+   503	): Record<string, unknown> | undefined {
+   504	    if (!value || typeof value !== "object" || Array.isArray(value)) {
+   505	        return undefined;
+   506	    }
+   507	    return value as Record<string, unknown>;
+   508	}
+===== shared/auth/api-key-creation.ts =====
+     1	import { eq } from "drizzle-orm";
+     2	import { drizzle } from "drizzle-orm/d1";
+     3	import { HTTPException } from "hono/http-exception";
+     4	import * as schema from "../db/better-auth.ts";
+     5	import { toModelPermissions } from "../registry/model-permissions.ts";
+     6	import { getRedirectUris, parseMetadata } from "./api-key-metadata.ts";
+     7	import { sanitizeAuthorizeAccountPermissions } from "./authorize-config.ts";
+     8	import { isUserBanned } from "./ban.ts";
+     9	import {
+    10	    isAllowedRedirectUrl,
+    11	    redirectUriMatchesAllowlist,
+    12	} from "./redirect-uri.ts";
+    13	
+    14	export type ApiKeyType = "secret" | "publishable";
+    15	
+    16	export type CallerMetadata = {
+    17	    redirectUris?: string[];
+    18	    redirectUri?: string;
+    19	    redirectOrigin?: string;
+    20	    deviceUserCode?: string;
+    21	    requestedClientId?: string;
+    22	    description?: string;
+    23	    earningsEnabled?: boolean;
+    24	};
+    25	
+    26	type CreateApiKeyForUserInput = {
+    27	    authClient: CreateApiKeyAuthClient;
+    28	    dbBinding: D1Database;
+    29	    userId: string;
+    30	    name: string;
+    31	    type: ApiKeyType;
+    32	    expiresIn?: number;
+    33	    allowedModels?: string[] | null;
+    34	    pollenBudget?: number | null;
+    35	    questPollenOnly?: boolean;
+    36	    accountPermissions?: string[] | null;
+    37	    metadata?: CallerMetadata;
+    38	    defaultCreatedVia: string;
+    39	    createdByApiKeyId?: string;
+    40	    originAppKeyId?: string;
+    41	};
+    42	
+    43	type CreateApiKeyAuthClient = {
+    44	    api: {
+    45	        createApiKey: (args: {
+    46	            body: {
+    47	                name: string;
+    48	                prefix: string;
+    49	                userId: string;
+    50	                expiresIn?: number;
+    51	                metadata?: Record<string, unknown>;
+    52	                permissions?: Record<string, string[]>;
+    53	            };
+    54	        }) => Promise<{
+    55	            id?: string;
+    56	            key?: string;
+    57	            name?: string | null;
+    58	            start?: string | null;
+    59	            expiresAt?: Date | null;
+    60	        }>;
+    61	        verifyApiKey: (args: { body: { key: string } }) => Promise<{
+    62	            valid: boolean;
+    63	            key?: { id?: string | null } | null;
+    64	        }>;
+    65	    };
+    66	};
+    67	
+    68	type VerifiedClientAttribution = {
+    69	    clientId: string;
+    70	};
+    71	
+    72	export function validateRedirectUriFormat(redirectUri: string): void {
+    73	    if (!/^[a-z][a-z0-9+\-.]*:\/\/.+/.test(redirectUri)) {
+    74	        throw new HTTPException(400, {
+    75	            message: "Must be a valid URL with a scheme (e.g. https://...)",
+    76	        });
+    77	    }
+    78	    let parsed: URL;
+    79	    try {
+    80	        parsed = new URL(redirectUri);
+    81	    } catch {
+    82	        throw new HTTPException(400, {
+    83	            message: "Must be a valid URL with a scheme (e.g. https://...)",
+    84	        });
+    85	    }
+    86	    if (parsed.hash) {
+    87	        throw new HTTPException(400, {
+    88	            message: "Redirect URI must not include a fragment",
+    89	        });
+    90	    }
+    91	    // Catches two URLs run together, e.g. typed after a pre-filled default.
+    92	    if (parsed.pathname.includes("://")) {
+    93	        throw new HTTPException(400, {
+    94	            message: "Redirect URI must be a single URL",
+    95	        });
+    96	    }
+    97	    if (!isAllowedRedirectUrl(parsed)) {
+    98	        throw new HTTPException(400, {
+    99	            message:
+   100	                "Redirect URI must use https://, except http:// is allowed for loopback hosts",
+   101	        });
+   102	    }
+   103	}
+   104	
+   105	function cleanRedirectUris(redirectUris: string[]): string[] {
+   106	    return redirectUris
+   107	        .map((uri) => uri.trim())
+   108	        .filter((uri): uri is string => uri.length > 0);
+   109	}
+   110	
+   111	function rejectInvalidClientId(): never {
+   112	    throw new HTTPException(400, {
+   113	        message: "Invalid client_id",
+   114	    });
+   115	}
+   116	
+   117	// Caller-provided metadata is restricted to a typed allowlist. Server-controlled
+   118	// fields like keyType / createdVia / plaintextKey / app attribution can never
+   119	// be set or overridden by callers, even via /account/keys metadata patches.
+   120	function pickCallerMetadata(
+   121	    metadata: CallerMetadata | undefined,
+   122	    isPublishable: boolean,
+   123	): Record<string, unknown> {
+   124	    const out: Record<string, unknown> = {};
+   125	    const redirectUris = cleanRedirectUris(metadata?.redirectUris ?? []);
+   126	    if (isPublishable && redirectUris.length > 0) {
+   127	        out.redirectUris = redirectUris;
+   128	    }
+   129	    if (typeof metadata?.redirectOrigin === "string")
+   130	        out.redirectOrigin = metadata.redirectOrigin;
+   131	    if (typeof metadata?.deviceUserCode === "string")
+   132	        out.deviceUserCode = metadata.deviceUserCode;
+   133	    if (typeof metadata?.description === "string")
+   134	        out.description = metadata.description;
+   135	    if (isPublishable) {
+   136	        out.earningsEnabled = metadata?.earningsEnabled === true;
+   137	    }
+   138	    return out;
+   139	}
+   140	
+   141	type ApiKeyDb = ReturnType<typeof drizzle<typeof schema>>;
+   142	
+   143	/**
+   144	 * Resolve a publishable app key that may act as an OAuth client_id. Rejects
+   145	 * keys that are unknown, revoked, not publishable, or owned by a banned user.
+   146	 */
+   147	export async function findPublishableClientKey(
+   148	    authClient: CreateApiKeyAuthClient,
+   149	    db: ApiKeyDb,
+   150	    clientId: string,
+   151	): Promise<typeof schema.apikey.$inferSelect | null> {
+   152	    if (!clientId.startsWith("pk_")) return null;
+   153	
+   154	    const result = await authClient.api.verifyApiKey({
+   155	        body: { key: clientId },
+   156	    });
+   157	    const keyId = result.valid ? result.key?.id : null;
+   158	    if (!keyId) return null;
+   159	
+   160	    const clientKey = await db.query.apikey.findFirst({
+   161	        where: eq(schema.apikey.id, keyId),
+   162	    });
+   163	    if (!clientKey || clientKey.prefix !== "pk") return null;
+   164	    const owner = await db.query.user.findFirst({
+   165	        where: eq(schema.user.id, clientKey.referenceId),
+   166	    });
+   167	    if (!owner || isUserBanned(owner)) return null;
+   168	    return clientKey;
+   169	}
+   170	
+   171	async function validateClientRedirectBinding(
+   172	    authClient: CreateApiKeyAuthClient,
+   173	    db: ApiKeyDb,
+   174	    metadata: CallerMetadata | undefined,
+   175	): Promise<VerifiedClientAttribution | null> {
+   176	    if (!metadata) return null;
+   177	    const requestedClientId = metadata.requestedClientId;
+   178	    if (typeof requestedClientId !== "string") {
+   179	        return null;
+   180	    }
+   181	
+   182	    const clientKey = await findPublishableClientKey(
+   183	        authClient,
+   184	        db,
+   185	        requestedClientId,
+   186	    );
+   187	    if (!clientKey) rejectInvalidClientId();
+   188	    const attribution = {
+   189	        clientId: clientKey.id,
+   190	    };
+   191	
+   192	    if (typeof metadata.deviceUserCode === "string") {
+   193	        const device = await db.query.deviceCode.findFirst({
+   194	            where: eq(
+   195	                schema.deviceCode.userCode,
+   196	                metadata.deviceUserCode.toUpperCase(),
+   197	            ),
+   198	        });
+   199	        if (
+   200	            !device ||
+   201	            device.status !== "pending" ||
+   202	            device.expiresAt < new Date() ||
+   203	            device.clientId !== requestedClientId
+   204	        ) {
+   205	            throw new HTTPException(400, {
+   206	                message: "client_id mismatch",
+   207	            });
+   208	        }
+   209	        return attribution;
+   210	    }
+   211	
+   212	    if (typeof metadata.redirectUri !== "string") {
+   213	        throw new HTTPException(400, {
+   214	            message: "redirect_uri is required when client_id is provided",
+   215	        });
+   216	    }
+   217	    // No scheme/format check on the incoming redirect_uri here: scheme policy is
+   218	    // enforced at registration (validateRedirectUriFormat on the app key's
+   219	    // redirectUris). The allowlist match below is the only gate the auth flow
+   220	    // applies, so a registered URI of any kind round-trips unchanged.
+   221	    const allowlist = getRedirectUris(parseMetadata(clientKey.metadata));
+   222	    if (!redirectUriMatchesAllowlist(metadata.redirectUri, allowlist)) {
+   223	        throw new HTTPException(400, {
+   224	            message: "redirect_uri not in allowlist for this client_id",
+   225	        });
+   226	    }
+   227	    return attribution;
+   228	}
+   229	
+   230	export async function createApiKeyForUser({
+   231	    authClient,
+   232	    dbBinding,
+   233	    userId,
+   234	    name,
+   235	    type,
+   236	    expiresIn,
+   237	    allowedModels,
+   238	    pollenBudget,
+   239	    questPollenOnly = false,
+   240	    accountPermissions,
+   241	    metadata,
+   242	    defaultCreatedVia,
+   243	    createdByApiKeyId,
+   244	    originAppKeyId,
+   245	}: CreateApiKeyForUserInput) {
+   246	    const db = drizzle(dbBinding, { schema });
+   247	    const attribution = await validateClientRedirectBinding(
+   248	        authClient,
+   249	        db,
+   250	        metadata,
+   251	    );
+   252	
+   253	    const isPublishable = type === "publishable";
+   254	    if (isPublishable && pollenBudget != null && pollenBudget !== 0) {
+   255	        throw new HTTPException(400, {
+   256	            message: "Publishable keys must have a pollen budget of 0",
+   257	        });
+   258	    }
+   259	    const effectivePollenBudget = isPublishable ? 0 : pollenBudget;
+   260	    const callerMetadata = pickCallerMetadata(metadata, isPublishable);
+   261	    if (Array.isArray(callerMetadata.redirectUris)) {
+   262	        for (const uri of callerMetadata.redirectUris as string[]) {
+   263	            validateRedirectUriFormat(uri);
+   264	        }
+   265	    }
+   266	
+   267	    const safeAccountPerms =
+   268	        sanitizeAuthorizeAccountPermissions(accountPermissions);
+   269	
+   270	    // An App Key (pk_) never authenticates requests, so it holds no scopes.
+   271	    const permissions: Record<string, string[]> = {};
+   272	    if (allowedModels && !isPublishable) {
+   273	        permissions.models = await toModelPermissions(dbBinding, allowedModels);
+   274	    }
+   275	    if (safeAccountPerms && safeAccountPerms.length > 0 && !isPublishable) {
+   276	        permissions.account = safeAccountPerms;
+   277	    }
+   278	
+   279	    const prefix = isPublishable ? "pk" : "sk";
+   280	    const baseMetadata = {
+   281	        ...callerMetadata,
+   282	        keyType: type,
+   283	        createdVia: defaultCreatedVia,
+   284	        ...(createdByApiKeyId && { createdByApiKeyId }),
+   285	        ...(originAppKeyId && { originAppKeyId }),
+   286	    };
+   287	
+   288	    const created = await authClient.api.createApiKey({
+   289	        body: {
+   290	            name,
+   291	            prefix,
+   292	            userId,
+   293	            ...(expiresIn != null && { expiresIn }),
+   294	            metadata: baseMetadata,
+   295	            permissions:
+   296	                Object.keys(permissions).length > 0 ? permissions : undefined,
+   297	        },
+   298	    });
+   299	
+   300	    if (!created?.id || !created?.key) {
+   301	        throw new HTTPException(500, {
+   302	            message: "Failed to create API key",
+   303	        });
+   304	    }
+   305	
+   306	    const finalMetadata = {
+   307	        ...baseMetadata,
+   308	        ...(isPublishable && { plaintextKey: created.key }),
+   309	    };
+   310	
+   311	    const d1Updates: Partial<typeof schema.apikey.$inferInsert> = {
+   312	        metadata: JSON.stringify(finalMetadata),
+   313	    };
+   314	    if (effectivePollenBudget != null) {
+   315	        d1Updates.pollenBalance = effectivePollenBudget;
+   316	    }
+   317	    if (questPollenOnly) d1Updates.questPollenOnly = true;
+   318	    if (!isPublishable && attribution) {
+   319	        d1Updates.byopClientKeyId = attribution.clientId;
+   320	    }
+   321	
+   322	    await db
+   323	        .update(schema.apikey)
+   324	        .set(d1Updates)
+   325	        .where(eq(schema.apikey.id, created.id));
+   326	
+   327	    return {
+   328	        id: created.id,
+   329	        key: created.key,
+   330	        name: created.name,
+   331	        type,
+   332	        prefix,
+   333	        start: created.start,
+   334	        expiresAt: created.expiresAt,
+   335	        expiresIn,
+   336	        permissions: Object.keys(permissions).length > 0 ? permissions : null,
+   337	        pollenBudget: effectivePollenBudget ?? null,
+   338	        questPollenOnly,
+   339	        byopClientKeyId:
+   340	            !isPublishable && attribution ? attribution.clientId : null,
+   341	        metadata: finalMetadata,
+   342	    };
+   343	}
+===== shared/auth/redirect-uri.ts =====
+     1	/**
+     2	 * Match an incoming `redirect_uri` against a registered allowlist for a `pk_`.
+     3	 *
+     4	 * Scheme policy (https-only except loopback http) is enforced at registration
+     5	 * time (see validateRedirectUriFormat). Matching trusts the stored allowlist
+     6	 * and does not re-check the scheme.
+     7	 *
+     8	 * Comparison rules:
+     9	 * - Scheme + hostname + path are matched exactly (after lowercasing host).
+    10	 * - Trailing slash on the path is insignificant: `/cb` and `/cb/` match.
+    11	 * - Query strings are ignored when the registered URI has no query: apps
+    12	 *   round-trip state (e.g. `?prompt=...`) and the auth code/token rides the URL
+    13	 *   fragment, not the query. If the registered URI includes a query, it must
+    14	 *   match exactly so existing query-bound allowlist entries are not broadened.
+    15	 * - For loopback entries (RFC 8252 §7.3): port is ignored — any port matches.
+    16	 *   This covers native/CLI apps that bind to ephemeral ports each run.
+    17	 * - For non-loopback entries: port must match (default ports normalized).
+    18	 * - Fragments are rejected; redirect URIs must not contain them.
+    19	 *
+    20	 * Returns false on any parse error or empty allowlist.
+    21	 *
+    22	 * Single source of truth for both /api/app-lookup (consent screen attribution)
+    23	 * and createApiKeyForUser (sk_ minting). Keep them aligned.
+    24	 */
+    25	export function redirectUriMatchesAllowlist(
+    26	    uri: string,
+    27	    allowlist: readonly string[] | null | undefined,
+    28	): boolean {
+    29	    if (!allowlist?.length) return false;
+    30	    const incoming = safeParse(uri);
+    31	    if (!incoming) return false;
+    32	    return allowlist.some((entry) => matchesEntry(incoming, entry));
+    33	}
+    34	
+    35	/**
+    36	 * Strict variant for the OAuth authorization-code flow (RFC 6749 §3.1.2.3):
+    37	 * the authorization code rides the redirect query string, so the fragment-era
+    38	 * leniency of accepting extra query params must not apply. The query must
+    39	 * equal the registered entry's exactly (normally: both absent). Loopback
+    40	 * ports stay port-agnostic (RFC 8252 §7.3) and one trailing slash is still
+    41	 * ignored. The legacy fragment flow keeps the lenient matcher above.
+    42	 */
+    43	export function redirectUriMatchesAllowlistExact(
+    44	    uri: string,
+    45	    allowlist: readonly string[] | null | undefined,
+    46	): boolean {
+    47	    if (!allowlist?.length) return false;
+    48	    const incoming = safeParse(uri);
+    49	    if (!incoming) return false;
+    50	    return allowlist.some((entry) => matchesEntry(incoming, entry, true));
+    51	}
+    52	
+    53	// Schemes the browser handles itself. Sending the consent page to one would
+    54	// load or run it on this page instead of handing the result back to an app.
+    55	const BROWSER_SCHEMES = new Set([
+    56	    "javascript:",
+    57	    "data:",
+    58	    "vbscript:",
+    59	    "file:",
+    60	    "blob:",
+    61	    "about:",
+    62	    "filesystem:",
+    63	]);
+    64	
+    65	/**
+    66	 * Parse the redirect target of the consent screen: a website, a loopback
+    67	 * server or a native app's own scheme (e.g. `myapp://callback`). Null when the
+    68	 * URL is unparseable or uses a scheme the browser handles itself, so such a
+    69	 * target never reaches window.location. The URL parser normalizes the scheme,
+    70	 * and callers navigate to the parsed URL, so case or whitespace tricks in the
+    71	 * raw string cannot slip past the check.
+    72	 */
+    73	export function parseAuthorizeRedirectUrl(url: string): URL | null {
+    74	    const parsed = safeParse(url);
+    75	    return parsed && !BROWSER_SCHEMES.has(parsed.protocol) ? parsed : null;
+    76	}
+    77	
+    78	export function isAllowedRedirectUrl(url: URL): boolean {
+    79	    if (url.protocol === "https:") return true;
+    80	    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+    81	}
+    82	
+    83	export function isLoopbackHostname(hostname: string): boolean {
+    84	    const h = normalizeHostname(hostname);
+    85	    if (h === "localhost" || h === "0.0.0.0" || h === "::1") return true;
+    86	    if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+    87	    return false;
+    88	}
+    89	
+    90	function safeParse(url: string): URL | null {
+    91	    try {
+    92	        return new URL(url);
+    93	    } catch {
+    94	        return null;
+    95	    }
+    96	}
+    97	
+    98	function normalizeHostname(hostname: string): string {
+    99	    return hostname
+   100	        .toLowerCase()
+   101	        .replace(/^\[(.*)\]$/, "$1")
+   102	        .replace(/\.$/, "");
+   103	}
+   104	
+   105	function normalizePathname(pathname: string): string {
+   106	    return pathname.length > 1 && pathname.endsWith("/")
+   107	        ? pathname.slice(0, -1)
+   108	        : pathname;
+   109	}
+   110	
+   111	function matchesEntry(
+   112	    incoming: URL,
+   113	    entryUrl: string,
+   114	    exactQuery = false,
+   115	): boolean {
+   116	    const entry = safeParse(entryUrl);
+   117	    if (!entry) return false;
+   118	    if (incoming.hash || entry.hash) return false;
+   119	    if (incoming.protocol !== entry.protocol) return false;
+   120	    if (
+   121	        normalizeHostname(incoming.hostname) !==
+   122	        normalizeHostname(entry.hostname)
+   123	    ) {
+   124	        return false;
+   125	    }
+   126	    if (
+   127	        normalizePathname(incoming.pathname) !==
+   128	        normalizePathname(entry.pathname)
+   129	    ) {
+   130	        return false;
+   131	    }
+   132	    if (exactQuery) {
+   133	        if (incoming.search !== entry.search) return false;
+   134	    } else if (entry.search && incoming.search !== entry.search) {
+   135	        return false;
+   136	    }
+   137	    if (isLoopbackHostname(entry.hostname)) return true;
+   138	    return incoming.port === entry.port;
+   139	}
+===== shared/auth/session-token.ts =====
+     1	import { jwtVerify, SignJWT } from "jose";
+     2	
+     3	// A short-lived bearer credential the Enter dashboard mints from its session
+     4	// cookie, so the dashboard calls the public API like any other client instead
+     5	// of keeping cookie-only copies of the same routes. It acts as the account
+     6	// owner with no key restrictions. It is not tied to the cookie session:
+     7	// signing out leaves it valid until it expires.
+     8	export const SESSION_TOKEN_PREFIX = "sess_";
+     9	export const SESSION_TOKEN_TTL_SECONDS = 900;
+    10	
+    11	const SESSION_TOKEN_ISSUER = "enter.pollinations.ai";
+    12	const SESSION_TOKEN_AUDIENCE = "pollinations-api";
+    13	const MAX_CLOCK_SKEW_SECONDS = 5;
+    14	
+    15	function signingKey(secret: string) {
+    16	    return new TextEncoder().encode(`pollinations-session-token:v1\0${secret}`);
+    17	}
+    18	
+    19	export async function signSessionToken(opts: {
+    20	    secret: string;
+    21	    userId: string;
+    22	    now?: number;
+    23	}): Promise<string> {
+    24	    const issuedAt = opts.now ?? Math.floor(Date.now() / 1000);
+    25	    const token = await new SignJWT({})
+    26	        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    27	        .setIssuer(SESSION_TOKEN_ISSUER)
+    28	        .setAudience(SESSION_TOKEN_AUDIENCE)
+    29	        .setSubject(opts.userId)
+    30	        .setIssuedAt(issuedAt)
+    31	        .setExpirationTime(issuedAt + SESSION_TOKEN_TTL_SECONDS)
+    32	        .sign(signingKey(opts.secret));
+    33	    return `${SESSION_TOKEN_PREFIX}${token}`;
+    34	}
+    35	
+    36	/**
+    37	 * Returns the user id a `sess_` token was minted for. Throws if it is
+    38	 * invalid. Callers check the prefix.
+    39	 */
+    40	export async function verifySessionToken(
+    41	    token: string,
+    42	    secret: string,
+    43	): Promise<string> {
+    44	    const { payload } = await jwtVerify(
+    45	        token.slice(SESSION_TOKEN_PREFIX.length),
+    46	        signingKey(secret),
+    47	        {
+    48	            algorithms: ["HS256"],
+    49	            issuer: SESSION_TOKEN_ISSUER,
+    50	            audience: SESSION_TOKEN_AUDIENCE,
+    51	            clockTolerance: MAX_CLOCK_SKEW_SECONDS,
+    52	            typ: "JWT",
+    53	            requiredClaims: ["exp", "sub"],
+    54	        },
+    55	    );
+    56	    if (typeof payload.sub !== "string" || !payload.sub) {
+    57	        throw new Error("Invalid session token subject");
+    58	    }
+    59	    return payload.sub;
+    60	}
+===== shared/auth/agent-run-token.ts =====
+     1	import { Buffer } from "node:buffer";
+     2	import { createHmac, timingSafeEqual } from "node:crypto";
+     3	import { jwtVerify, SignJWT } from "jose";
+     4	
+     5	export const AGENT_RUN_TOKEN_PREFIX = "ag_";
+     6	export const AGENT_RUN_TOKEN_TTL_SECONDS = 1800;
+     7	
+     8	const AGENT_RUN_TOKEN_ISSUER = "gen.pollinations.ai";
+     9	const AGENT_RUN_TOKEN_AUDIENCE = "pollinations-api";
+    10	const MAX_CLOCK_SKEW_SECONDS = 5;
+    11	
+    12	export type AgentRunClaims = {
+    13	    parentApiKeyId: string;
+    14	    // The request_id of the call that minted this token, so its generations can
+    15	    // be grouped. The agent's steps arrive as separate requests, each minting
+    16	    // its own id, and this token is the only thing that crosses that hop. Keep
+    17	    // it in the signature: the agent holds the token, so a header carrying the
+    18	    // same id would be a value the agent gets to choose.
+    19	    parentRequestId: string;
+    20	    managedAgentId?: string;
+    21	    // The community model id of the agent the token was minted for, so a
+    22	    // refusal during the run can name the agent that asked.
+    23	    agentModelId?: string;
+    24	    issuedAt: number;
+    25	    expiresAt: number;
+    26	};
+    27	
+    28	function signingKey(secret: string): Uint8Array {
+    29	    return new TextEncoder().encode(
+    30	        `pollinations-agent-run-token:v1\0${secret}`,
+    31	    );
+    32	}
+    33	
+    34	export async function signAgentRunToken(opts: {
+    35	    secret: string;
+    36	    parentApiKeyId: string;
+    37	    parentRequestId: string;
+    38	    managedAgentId?: string;
+    39	    agentModelId?: string;
+    40	    expiresIn?: number;
+    41	    now?: number;
+    42	}): Promise<string> {
+    43	    const issuedAt = opts.now ?? Math.floor(Date.now() / 1000);
+    44	    const expiresIn = opts.expiresIn ?? AGENT_RUN_TOKEN_TTL_SECONDS;
+    45	    if (expiresIn < 1 || expiresIn > AGENT_RUN_TOKEN_TTL_SECONDS) {
+    46	        throw new Error("Invalid agent run token lifetime");
+    47	    }
+    48	
+    49	    const token = await new SignJWT({
+    50	        version: 1,
+    51	        parentRequestId: opts.parentRequestId,
+    52	        ...(opts.managedAgentId ? { managedAgentId: opts.managedAgentId } : {}),
+    53	        ...(opts.agentModelId ? { agentModelId: opts.agentModelId } : {}),
+    54	    })
+    55	        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    56	        .setIssuer(AGENT_RUN_TOKEN_ISSUER)
+    57	        .setAudience(AGENT_RUN_TOKEN_AUDIENCE)
+    58	        .setSubject(opts.parentApiKeyId)
+    59	        .setJti(crypto.randomUUID())
+    60	        .setIssuedAt(issuedAt)
+    61	        .setExpirationTime(issuedAt + expiresIn)
+    62	        .sign(signingKey(opts.secret));
+    63	
+    64	    return `${AGENT_RUN_TOKEN_PREFIX}${token}`;
+    65	}
+    66	
+    67	export async function verifyAgentRunToken(
+    68	    token: string,
+    69	    secret: string,
+    70	    now = Math.floor(Date.now() / 1000),
+    71	): Promise<AgentRunClaims> {
+    72	    if (!token.startsWith(AGENT_RUN_TOKEN_PREFIX)) {
+    73	        throw new Error("Invalid agent run token prefix");
+    74	    }
+    75	
+    76	    const { payload } = await jwtVerify(
+    77	        token.slice(AGENT_RUN_TOKEN_PREFIX.length),
+    78	        signingKey(secret),
+    79	        {
+    80	            algorithms: ["HS256"],
+    81	            issuer: AGENT_RUN_TOKEN_ISSUER,
+    82	            audience: AGENT_RUN_TOKEN_AUDIENCE,
+    83	            currentDate: new Date(now * 1000),
+    84	            clockTolerance: MAX_CLOCK_SKEW_SECONDS,
+    85	            typ: "JWT",
+    86	        },
+    87	    );
+    88	
+    89	    // jwtVerify has already proven this token came from signAgentRunToken with
+    90	    // this secret, and checked issuer, audience and expiry. What is left is
+    91	    // shape: the JWT library types every claim as unknown.
+    92	    if (
+    93	        typeof payload.sub !== "string" ||
+    94	        !payload.sub ||
+    95	        typeof payload.jti !== "string" ||
+    96	        !payload.jti ||
+    97	        typeof payload.iat !== "number" ||
+    98	        typeof payload.exp !== "number" ||
+    99	        typeof payload.parentRequestId !== "string" ||
+   100	        !payload.parentRequestId ||
+   101	        (payload.managedAgentId !== undefined &&
+   102	            (typeof payload.managedAgentId !== "string" ||
+   103	                !payload.managedAgentId)) ||
+   104	        (payload.agentModelId !== undefined &&
+   105	            (typeof payload.agentModelId !== "string" || !payload.agentModelId))
+   106	    ) {
+   107	        throw new Error("Invalid agent run token claims");
+   108	    }
+   109	
+   110	    return {
+   111	        parentApiKeyId: payload.sub,
+   112	        parentRequestId: payload.parentRequestId,
+   113	        ...(typeof payload.managedAgentId === "string"
+   114	            ? { managedAgentId: payload.managedAgentId }
+   115	            : {}),
+   116	        ...(typeof payload.agentModelId === "string"
+   117	            ? { agentModelId: payload.agentModelId }
+   118	            : {}),
+   119	        issuedAt: payload.iat,
+   120	        expiresAt: payload.exp,
+   121	    };
+   122	}
+   123	
+   124	export type Grant =
+   125	    | { category: string }
+   126	    | { model: string }
+   127	    | { permission: string };
+   128	
+   129	/**
+   130	 * Signs that a run of this agent was refused this grant on this key. The grant
+   131	 * link reaches the owner through the agent, so an unsigned name would let one
+   132	 * agent pose as another. Binding the key and the grant stops a signed name
+   133	 * from being moved onto a different request.
+   134	 */
+   135	export function signGrantAgent(opts: {
+   136	    secret: string;
+   137	    apiKeyId: string;
+   138	    grant: Grant;
+   139	    agent: string;
+   140	}): string {
+   141	    const { grant } = opts;
+   142	    const entry =
+   143	        "category" in grant
+   144	            ? `category:${grant.category}`
+   145	            : "model" in grant
+   146	              ? `model:${grant.model}`
+   147	              : `permission:${grant.permission}`;
+   148	    return createHmac("sha256", `pollinations-grant-agent:v1\0${opts.secret}`)
+   149	        .update([opts.apiKeyId, entry, opts.agent].join("\0"))
+   150	        .digest("base64url");
+   151	}
+   152	
+   153	export function verifyGrantAgent(
+   154	    opts: Parameters<typeof signGrantAgent>[0] & { sig: string },
+   155	): boolean {
+   156	    const expected = Buffer.from(signGrantAgent(opts));
+   157	    const actual = Buffer.from(opts.sig);
+   158	    return (
+   159	        expected.length === actual.length && timingSafeEqual(expected, actual)
+   160	    );
+   161	}
+===== shared/auth/account-permissions.ts =====
+     1	import { HTTPException } from "hono/http-exception";
+     2	import type { RefusalContext } from "../http/fix-link.ts";
+     3	import { permissionRequired } from "../http/permission-required-error.ts";
+     4	import type { CONSENT_PERMISSIONS } from "./authorize-config.ts";
+     5	
+     6	type AccountPermission = (typeof CONSENT_PERMISSIONS)[number];
+     7	
+     8	type AccountPermissionApiKey = {
+     9	    permissions?: Record<string, string[]>;
+    10	};
+    11	
+    12	// The account owner (a dashboard session or session token) has no key, so no
+    13	// key restrictions apply. A key needs the scope granted explicitly.
+    14	export function hasAccountPermission(
+    15	    apiKey: AccountPermissionApiKey | undefined,
+    16	    permission: AccountPermission,
+    17	): boolean {
+    18	    if (!apiKey) return true;
+    19	    return !!apiKey.permissions?.account?.includes(permission);
+    20	}
+    21	
+    22	/** Refuses a key without the permission, with a link to grant it to that key. */
+    23	export function requireAccountPermission(
+    24	    c: RefusalContext,
+    25	    permission: AccountPermission,
+    26	): void {
+    27	    if (hasAccountPermission(c.var.auth?.apiKey, permission)) return;
+    28	    // Agent run tokens never carry account permissions (api-key.ts), so a
+    29	    // grant would only widen the owner's key without letting the agent in.
+    30	    if (c.var.auth?.agentRun) {
+    31	        throw new HTTPException(403, {
+    32	            message: `Agent runs can't use 'account:${permission}'.`,
+    33	        });
+    34	    }
+    35	    throw permissionRequired(
+    36	        c,
+    37	        { permission },
+    38	        `API key does not have 'account:${permission}' permission.`,
+    39	    );
+    40	}
+===== shared/auth/authorize-config.ts =====
+     1	import {
+     2	    isLoopbackHostname,
+     3	    parseAuthorizeRedirectUrl,
+     4	} from "./redirect-uri.ts";
+     5	
+     6	/**
+     7	 * Parse a scope/permissions URL parameter. Accepts both OAuth-canonical
+     8	 * space-separated format (`scope=usage%20keys`) and our legacy
+     9	 * comma-separated format (`permissions=usage,keys`).
+    10	 */
+    11	export function parseScopeList(val: unknown): string[] | null {
+    12	    if (typeof val !== "string" || !val) return null;
+    13	    const items = val
+    14	        .split(/[\s,]+/)
+    15	        .map((s) => s.trim())
+    16	        .filter(Boolean);
+    17	    return items.length ? items : null;
+    18	}
+    19	
+    20	type AuthorizeDefaultsInput = {
+    21	    models?: string[] | null;
+    22	    budget?: number | null;
+    23	    expiry?: number | null;
+    24	    permissions?: string[] | null;
+    25	};
+    26	
+    27	/**
+    28	 * An https client_id is a Client ID Metadata Document URL (MCP clients such
+    29	 * as Claude Code or Codex). Every other client_id is a registered pk_ app.
+    30	 */
+    31	export function isClientMetadataUrl(clientId: string | undefined): boolean {
+    32	    return !!clientId?.startsWith("https://");
+    33	}
+    34	
+    35	export const DEFAULT_CONSENT_BUDGET = 5;
+    36	export const DEFAULT_CONSENT_EXPIRY_DAYS = 7;
+    37	/** The most budget a link can pre-fill; the user can raise it by hand. */
+    38	export const MAX_LINK_CONSENT_BUDGET = 10;
+    39	
+    40	const SECONDS_PER_DAY = 24 * 60 * 60;
+    41	
+    42	/**
+    43	 * The expiry field is in days and accepts fractions, but key creation takes
+    44	 * whole seconds (`z.number().int().positive()`), so a fraction landing
+    45	 * mid-second failed validation. Rounding is the whole fix.
+    46	 *
+    47	 * An empty field is the only thing that means "no expiry". Anything invalid
+    48	 * stays invalid and the server rejects it, which the dialogs surface.
+    49	 */
+    50	export function expiryDaysToExpiresIn(
+    51	    expiryDays: number | null | undefined,
+    52	): number | undefined {
+    53	    if (expiryDays == null) return undefined;
+    54	    return Math.round(expiryDays * SECONDS_PER_DAY);
+    55	}
+    56	
+    57	/**
+    58	 * An S256 PKCE code_challenge is exactly 43 base64url chars (unpadded
+    59	 * SHA-256, RFC 7636 §4.2). Single source of truth for the consent page's
+    60	 * front-door check and the server's CreateCodeSchema.
+    61	 */
+    62	export const PKCE_S256_CHALLENGE_REGEX = /^[A-Za-z0-9_-]{43}$/;
+    63	
+    64	/**
+    65	 * Account permissions the user can grant at the consent screen. Every scope is
+    66	 * opt-in — nothing is implicit. A caller's own key metadata (`/account/key`),
+    67	 * its budget, its usage (`/account/key/usage`), and the user's github username +
+    68	 * image (`/account/profile`) are all readable without any scope.
+    69	 *
+    70	 * - `profile`: read account name and email
+    71	 * - `usage`: read full account balance + account-wide usage (key's own
+    72	 *   balance and usage are free regardless)
+    73	 * - `keys`: account admin; create, list, and revoke API keys, plus My Models
+    74	 *   access where enabled.
+    75	 * - `machines`: create and run hosted sandboxes.
+    76	 */
+    77	export const CONSENT_PERMISSIONS = [
+    78	    "profile",
+    79	    "usage",
+    80	    "keys",
+    81	    "machines",
+    82	] as const;
+    83	
+    84	export const OAUTH_SCOPES = ["generate", ...CONSENT_PERMISSIONS] as const;
+    85	
+    86	/** Generation is inherent to API keys; account scopes remain opt-in. */
+    87	export function getGrantedOAuthScope(
+    88	    requested: ReadonlySet<string>,
+    89	    accountPermissions: string[],
+    90	): string | undefined {
+    91	    if (!requested.size) return undefined;
+    92	    return [
+    93	        ...(requested.has("generate") ? ["generate"] : []),
+    94	        ...accountPermissions,
+    95	    ].join(" ");
+    96	}
+    97	
+    98	export function sanitizeAuthorizeAccountPermissions(
+    99	    permissions: string[] | null | undefined,
+   100	): string[] | null {
+   101	    if (!permissions?.length) return null;
+   102	
+   103	    const filtered = Array.from(
+   104	        new Set(
+   105	            permissions.filter((permission) =>
+   106	                CONSENT_PERMISSIONS.includes(
+   107	                    permission as (typeof CONSENT_PERMISSIONS)[number],
+   108	                ),
+   109	            ),
+   110	        ),
+   111	    );
+   112	
+   113	    return filtered.length ? filtered : null;
+   114	}
+   115	
+   116	/**
+   117	 * Most people click "Allow" without reading, so a link can request `keys` and
+   118	 * `machines` but never tick them: the user has to grant those on purpose.
+   119	 */
+   120	const DELIBERATE_CONSENT_PERMISSIONS: readonly string[] = ["keys", "machines"];
+   121	
+   122	/** The requested account permissions the consent screen starts with ticked. */
+   123	export function getPreselectedConsentPermissions(
+   124	    permissions: string[] | null | undefined,
+   125	): string[] | null {
+   126	    const preselected = sanitizeAuthorizeAccountPermissions(
+   127	        permissions,
+   128	    )?.filter(
+   129	        (permission) => !DELIBERATE_CONSENT_PERMISSIONS.includes(permission),
+   130	    );
+   131	    return preselected?.length ? preselected : null;
+   132	}
+   133	
+   134	/** A redirect to this computer, e.g. a local MCP client such as Claude Code. */
+   135	function isLoopbackRedirect(url: URL | null): boolean {
+   136	    return url?.protocol === "http:" && isLoopbackHostname(url.hostname);
+   137	}
+   138	
+   139	/**
+   140	 * The requested permissions the consent screen offers. `keys` (account admin)
+   141	 * is only offered in the device flow (polli) and on redirects to this computer
+   142	 * (local MCP clients such as Claude Code): a phished link that redirects to a
+   143	 * website must never get it.
+   144	 */
+   145	export function getConsentPermissionChoices(
+   146	    requested: ReadonlySet<string>,
+   147	    isDeviceFlow: boolean,
+   148	    redirectUrl: URL | null,
+   149	): string[] {
+   150	    const offersKeys = isDeviceFlow || isLoopbackRedirect(redirectUrl);
+   151	    return CONSENT_PERMISSIONS.filter(
+   152	        (permission) =>
+   153	            requested.has(permission) && (offersKeys || permission !== "keys"),
+   154	    );
+   155	}
+   156	
+   157	/**
+   158	 * Whether a grant link may add `keys` to an existing key. Same rule as the
+   159	 * consent screen: never to a key an app got by redirecting to a website. Keys
+   160	 * from polli's device login, the dashboard or the API have no redirect origin.
+   161	 */
+   162	export function canGrantKeysByLink(redirectOrigin: unknown): boolean {
+   163	    if (redirectOrigin === undefined) return true;
+   164	    return (
+   165	        typeof redirectOrigin === "string" &&
+   166	        isLoopbackRedirect(parseAuthorizeRedirectUrl(redirectOrigin))
+   167	    );
+   168	}
+   169	
+   170	export function getAuthorizeInitialPermissions({
+   171	    models,
+   172	    budget,
+   173	    expiry,
+   174	    permissions,
+   175	}: AuthorizeDefaultsInput) {
+   176	    return {
+   177	        allowedModels: models,
+   178	        pollenBudget: Math.max(
+   179	            0,
+   180	            Math.min(budget ?? DEFAULT_CONSENT_BUDGET, MAX_LINK_CONSENT_BUDGET),
+   181	        ),
+   182	        expiryDays: expiry ?? DEFAULT_CONSENT_EXPIRY_DAYS,
+   183	        accountPermissions: getPreselectedConsentPermissions(permissions),
+   184	    };
+   185	}
+===== shared/auth/github-id-list.ts =====
+     1	export const COMMUNITY_MODEL_ALLOWED_GITHUB_IDS = [
+     2	    36901823, // ElliotEtag
+     3	    5099901, // voodoohop
+     4	    101795137, // lizzieliza
+     5	    248917639, // fouchyelliot-rgb
+     6	    241978997, // pollen-router
+     7	    189873015, // sharktide
+     8	    74301576, // Circuit-Overtime
+     9	    158852059, // Itachi-1824
+    10	    84981998, // Spit-fires
+    11	    204561696, // tomdacatto
+    12	    93234024, // skullcrushercmd
+    13	    201248601, // CloudCompile
+    14	    206557620, // smplstuff
+    15	    201380514, // MarcosFRG
+    16	    88273873, // ytpk
+    17	    45744798, // Minor-fun
+    18	    178960782, // morriszdweck
+    19	    219871313, // mikl-shortcuts
+    20	    45357531, // cemalgnlts
+    21	    123343834, // LynxUnbanned
+    22	    244879637, // Catniti
+    23	    216855486, // Bakhshi7889
+    24	    64634725, // vendouple
+    25	    182555207, // YoannDev90
+    26	    195966113, // JustScriptzz
+    27	    113566110, // riofndev
+    28	    188266626, // solarnode-developement
+    29	    183505255, // timemachine-studio
+    30	    228371309, // gggff123
+    31	    184364250, // Takax62
+    32	    162339795, // meow18838
+    33	    130518306, // Lorodn4x
+    34	    198414737, // AkshayCoder48
+    35	    205307392, // chirag-gamer
+    36	    240205932, // pollinations-router
+    37	    314960022, // pollinations-ai
+    38	    57826942, // guus6457
+    39	    36392751, // chigwell
+    40	    228795921, //novastardev
+    41	    30191185, // rekty
+    42	    85689068, // pegalink
+    43	    147928812, // iotserver24
+    44	    24752658, // zero2launch
+    45	    63298614, // xiaotian1171
+    46	    84572851, // immature-yt
+    47	    177411725, // Davizigjojo
+    48	    251958874, // scriptsnsenses-sys
+    49	    313017538, // lolyeon2011-oss
+    50	    160404236, // ZapGaming
+    51	    232026792, // aikhusus2025-ctrl
+    52	    286385677, // Creatneworld
+    53	    156744205, // tsgabrielle
+    54	    243879765, // fadyabohamza-netizen
+    55	    77214872, // aadirajuthup
+    56	    11493034, // Jonakss
+    57	    334253163, // suniyintellekt998114-star
+    58	    128448668, // Saauf
+    59	    319410519, // afanasevmylife
+    60	    133474899, // Marcus-Mok-GH
+    61	    117812547, // kreggscode
+    62	    202215077, // Guest453
+    63	    181748869, // Apollohzl
+    64	    293850242, // muhamedsohaib
+    65	    311195727, // massafizidane21-ux
+    66	    321230251, // vathsothary72-source
+    67	    222464478, // achraf2011achraf
+    68	    336811879, // helicopterbrr
+    69	    118121166, // murderszn
+    70	    228286415, // samueltargino0567-ux
+    71	    140301069, // Derlifed
+    72	    248852494, // floxygit
+    73	    50811139, // KT-Society
+    74	    197048004, // sonofstrange
+    75	    125762682, // connor11016
+    76	    197126260, // Maliot100X
+    77	    337741234, // papa-pichita
+    78	    320197033, // specrz
+    79	    3012542, // danhquach
+    80	    17449478, // pavanyellow
+    81	    193636367, // Codertalha5524
+    82	    99681197, // roboroyce
+    83	    188037210, // patbing
+    84	    349012933, // machoskir-creator
+    85	] as const;
+    86	
+    87	const COMMUNITY_MODEL_ALLOWED_GITHUB_ID_SET = new Set<number>(
+    88	    COMMUNITY_MODEL_ALLOWED_GITHUB_IDS,
+    89	);
+    90	
+    91	export function isCommunityModelAllowedGithubId(
+    92	    githubId: number | null | undefined,
+    93	): boolean {
+    94	    return (
+    95	        typeof githubId === "number" &&
+    96	        COMMUNITY_MODEL_ALLOWED_GITHUB_ID_SET.has(githubId)
+    97	    );
+    98	}
+    99	
+   100	/**
+   101	 * Parse a comma-separated list of numeric GitHub user IDs.
+   102	 * Strict: only entries matching /^\d+$/ are kept, so "123abc" is dropped
+   103	 * instead of being silently truncated to 123.
+   104	 */
+   105	export function parseGithubIdList(raw: string | undefined | null): Set<number> {
+   106	    if (!raw) return new Set();
+   107	    const ids = new Set<number>();
+   108	    for (const part of raw.split(",")) {
+   109	        const trimmed = part.trim();
+   110	        if (!/^\d+$/.test(trimmed)) continue;
+   111	        const n = Number(trimmed);
+   112	        if (n > 0) ids.add(n);
+   113	    }
+   114	    return ids;
+   115	}
