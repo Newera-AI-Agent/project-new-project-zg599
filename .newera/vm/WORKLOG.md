@@ -54,3 +54,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T13:36:25.885Z | VM 2/3] boot auto-setup: npm install --no-audit --no-fund ok
 - [2026-11-12T13:37:00.906Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== BRIEF.md =====' && cat BRIEF.md && echo && echo '===== TODO.md =====' &&
 - [2026-11-12T13:39:38.028Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '--- upstream install tail ---' && tail -3 /tmp/upstream-install.log && ls -d u
+- [2026-11-12T13:41:51.422Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > scripts/verify.sh <<'SH' #!/usr/bin/env bash # Verify a PoC against the REAL u

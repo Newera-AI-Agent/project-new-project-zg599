@@ -1,3 +1,7 @@
 
 # upstream checkout (not part of this report repo)
 upstream/
+
+# local deps
+node_modules/
+*.log
