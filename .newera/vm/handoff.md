@@ -1,3 +1,7 @@
+# RELAY HANDOFF — job vm-mwdlc1t4-ulx6tden (VM 2 of 3)
+Written at the 15-minute checkpoint with 83 min left, after 53 steps.
+
+## Original task
 # RELAY HANDOFF — job vm-mwddhxqn-zwt1qorx (VM 1 of 3)
 Written at the 15-minute checkpoint with 15 min left, after 172 steps.
 
@@ -401,45 +405,82 @@ AGENT: ⚠️ attempt 1/3 failed: signal is aborted without reason — retrying 
 - [2026-11-12T12:43:12.666Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && for w in gen.pollinations.ai enter.pollinations.ai media.polli
 - [2026-11-12T12:44:31.988Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== root vitest.config.ts ==='; cat vitest.config.ts; echo '=== root package.j
 - [2026-11-12T12:47:43.197Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && timeout 240 npx --yes @cloudflare/vitest-pool-workers --version 2>/dev/null | head -
+- [2026-11-12T12:48:49.488Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p scripts poc/ns0 && cat > poc/ns0/d1hello.test.ts <<'EOF' impor
+
+## Progress so far
+(no rolling summary was generated — reconstruct state from the git log below and the repo itself)
+
+## Worklog (latest lines — every VM in this chain appended)
+- [2026-11-12T12:06:24.706Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && ls node_modules/vitest/node_modules/@vitest/ && cp -r node_mod
+- [2026-11-12T12:06:56.764Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/enter.pollinations.ai && timeout 420 npx vitest run test/integrat
+- [2026-11-12T12:12:00.496Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== TODO.md ====='; cat TODO.md; echo; echo '===== notes tree ====='; find n
+- [2026-11-12T12:13:59.929Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && echo '=== enter vitest.config ==='; cat enter.pollinations.ai/
+- [2026-11-12T12:32:07.397Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== git status ==='; git status --short | head -30; echo '=== gitignore ==='; 
+- [2026-11-12T12:33:32.192Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p scripts poc/enter poc/gen evidence research && cat > scripts/run-pocs.sh <<
+- [2026-11-12T12:36:34.965Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat evidence/prior-art-map.md && echo '=== vitest.config ===' && cat vitest.config.t
+- [2026-11-12T12:36:52.644Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && ls test/helpers test/mocks test/setup test
+- [2026-11-12T12:37:37.965Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p .newera/cyber/engagement/evidence && cat > .newera/cyber/scope.json <<'EOF'
+- [2026-11-12T12:40:26.898Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/media.pollinations.ai && ls src && echo '=== test dir ===' && ls 
+- [2026-11-12T12:41:49.735Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat package.json && echo '=== vitest.config ===' && cat vitest.config.ts && echo '==
+- [2026-11-12T12:42:40.918Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat poc/smoke.test.ts && echo '=== run root suite ===' && timeout 300 npx vitest run
+- [2026-11-12T12:43:12.666Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && for w in gen.pollinations.ai enter.pollinations.ai media.polli
+- [2026-11-12T12:44:31.988Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== root vitest.config.ts ==='; cat vitest.config.ts; echo '=== root package.j
+- [2026-11-12T12:47:43.197Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && timeout 240 npx --yes @cloudflare/vitest-pool-workers --version 2>/dev/null | head -
 - [2026-11-12T12:48:49.488Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p scripts poc/ns0 && cat > poc/ns0/d1hello.test.ts <<'EOF' import { env } fro
 - [2026-11-12T12:50:58Z] VM2: wrote BRIEF.md (methodology + PoC recipe + dedupe rule); staged-runner scripts/run-poc.sh verified against real upstream D1 (1 test passed).
 - [2026-11-12T12:50:58.520Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > BRIEF.md <<'EOF' # RED-TEAM BRIEF — pollinations (authorized, local-only) ## 
 - [2026-11-12T13:29:14.143Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== vitest.config ===' && cat vitest.config.ts && echo '=== package.json ===' 
 - [2026-11-12T13:31:29.458Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF'
 - [2026-11-12T13:35:37.479Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf findings research waves && cat > poc/ssrf/user-media
+- [2026-11-12T13:35:37.800Z | VM 1/3] RELAY checkpoint at step 172 — handoff committed, VM 2 continues.
+- [2026-11-12T13:36:24.045Z | VM 2/3] boot: VM 2/3 online (job vm-mwdlc1t4-ulx6tden, 240 min budget, relay continuation)
+- [2026-11-12T13:36:24.045Z | VM 2/3] self-check PASS: shell: VERIFIED (the harness executed bash on this VM at boot); node: v24.22.2; npm: 11.19.1; python3: Python 3.12.3; git: repo checked out @ cbc2b43; browser: Google Chrome 156.0.8078.79 available — the browser_* tools drive it (playwright-core installs on first browser call); filesystem: WRITABLE 
+- [2026-11-12T13:36:25.885Z | VM 2/3] boot auto-setup: npm install --no-audit --no-fund ok
+- [2026-11-12T13:37:00.906Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== BRIEF.md =====' && cat BRIEF.md && echo && echo '===== TODO.md =====' &&
+- [2026-11-12T13:39:38.028Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '--- upstream install tail ---' && tail -3 /tmp/upstream-install.log && ls -d u
+- [2026-11-12T13:41:51.422Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > scripts/verify.sh <<'SH' #!/usr/bin/env bash # Verify a PoC against the REAL u
+- [2026-11-12T13:44:06.262Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p work research findings && cat > work/agent-brief.md <<'MD' # SHARED RED-TEA
+- [2026-11-12T13:48:14.381Z | VM 2/3] PLAN updated: 32 steps
+- [2026-11-12T13:51:52.659Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && ls -la .newera && find .newera -maxdepth 3 -type f | head -50 && echo '=== package.j
+- [2026-11-12T13:53:03.398Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== vitest.config.ts ===' && cat vitest.config.ts && echo '=== package.json ==
+- [2026-11-12T14:32:26.833Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== scripts/verify.sh =====' && cat scripts/verify.sh 2>/dev/null && echo '=
+- [2026-11-12T15:11:13.828Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== package.json ==='; cat package.json; echo '=== vitest.config.ts ==='; cat 
+- [2026-11-12T15:17:08.067Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && timeout 300 npx vitest run --reporter=basic 2>&1 | tail -25
+- [2026-11-12T15:22:28.729Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== scripts ==='; ls -la scripts/; echo '=== run-poc.sh ==='; cat scripts/run-
+- [2026-11-12T15:24:06.709Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== verify.sh ==='; cat scripts/verify.sh; echo '=== new-issue.mjs ==='; cat s
+- [2026-11-12T15:26:25.958Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF' import { describe, expect, it } fr
+- [2026-11-12T15:30:39.234Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== upstream shared/user-media-url.ts ====='; cat -n upstream/pollinations/s
+- [2026-11-12T15:34:11.319Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc-workers/ns0 && mv poc/ns0/d1hello.test.ts poc-workers/ns0/d1hello.test.
 
 ## Repository state
 Changed/added files:
- M .newera/vm/WORKLOG.md
  M upstream/pollinations
-?? evidence/ssrf/user-media-url-hostname-bypass.txt
-?? poc/ssrf/user-media-url-hostname-bypass.test.ts
 
 Recent commits:
-0b8e801 cloud status: step 174
-5505280 cloud status: step 174
-7ac021a cloud status: step 173
-c6cae9b cloud status: step 172
-593d8e9 cloud status: step 170
-9c5eb71 cloud status: step 170
-e342442 cloud status: step 169
-858aa49 cloud status: step 166
-2f76fd9 cloud status: step 165
-3384430 cloud status: step 162
-f31cb56 cloud status: step 157
-8b87020 cloud status: step 154
-951dfdc cloud status: step 148
-f806ef8 cloud status: step 148
-5ca5444 cloud status: step 147
+2969b4e cloud status: step 52
+70035c5 cloud status: step 52
+cf7fa01 cloud status: step 52
+15f4c4d cloud status: step 52
+10de16d cloud status: step 52
+b3577fb cloud status: step 52
+3d52194 cloud status: step 52
+227dbb7 cloud status: step 52
+bddd57d cloud status: step 52
+215965c cloud status: step 52
+8203e99 cloud status: step 52
+1db5e97 cloud status: step 52
+19a592c cloud status: step 51
+c23f400 cloud status: step 51
+be76cc8 cloud status: step 51
 
 ## Current plan (todo state)
 ## CURRENT PLAN (32 steps)
-1. [~] W0 setup: clone upstream, scope file, prior-art dedupe map, PoC harness skeleton (npm+tsx) (req R4)  <- NOW
-2. [ ] W1 enter.pollinations.ai auth/session/cookie/CORS/CSRF surface (req R1)
+1. [x] W0 setup: clone upstream, scope file, prior-art dedupe map, PoC harness skeleton (npm+tsx) (req R4)
+2. [~] W1 enter.pollinations.ai auth/session/cookie/CORS/CSRF surface (req R1)  <- NOW
 3. [ ] W2 enter.pollinations.ai API-key lifecycle (create/permissions/budget/expiry/revoke) (req R1)
 4. [ ] W3 OAuth authorize/device-flow/token endpoints (req R1)
 5. [ ] W4 shared/auth helpers (redirect-uri, session-token, agent-run-token, ban, permissions) (req R1)
-6. [ ] W5 shared/billing (deduction, bucket-selection, markup, rewards, internal-automation, prec (req R1)
+6. [ ] W5 shared/billing (deduction, bucket-selection, markup, rewards, internal-automation, pric (req R1)
 7. [ ] W6 gen routes: realtime sessions (req R1)
 8. [ ] W7 gen routes: e2b sandboxes + azure sandboxes (req R1)
 9. [ ] W8 gen routes: jobs + generation-executor + generation-handlers (req R1)
@@ -450,23 +491,23 @@ f806ef8 cloud status: step 148
 14. [ ] W13 media.pollinations.ai service (listing, tags, uploads, signed URLs) (req R1)
 15. [ ] W14 packages/auth server (session cookies, HMAC, rotation) + packages/sdk (req R1)
 16. [ ] W15 apps/polli CLI + packages/polli-cli (key handling, command injection, secrets) (req R1)
-17. [ ] W16 apps MCP servers: network-mcp, computer-mcp, ffmpeg-mcp, exa-mcp, machines, composio,  (req R1)
+17. [ ] W16 apps MCP servers: network-mcp, computer-mcp, ffmpeg-mcp, exa-mcp, machines, composio (req R1)
 18. [ ] W17 apps bots & services: catgpt, discord bots, mama-barbara, ai-dungeon-master (req R1)
 19. [ ] W18 enter.pollinations.ai routes: quests, community-endpoints, payments/stripe (req R1)
 20. [ ] W19 operations dashboards/monitoring (unauth data exposure, prod D1 reads) (req R1)
 21. [ ] W20 pollinations.ai website frontend + server endpoints (XSS/SSRF/leaks) (req R1)
-22. [ ] W21 shared infra: client-ip trust, rate-limit, cache, secret-encryption, github client, us (req R1)
+22. [ ] W21 shared infra: client-ip trust, rate-limit, cache, secret-encryption, github client (req R1)
 23. [ ] W22 enter.pollinations.ai stripe-billing utils + payment webhooks (req R1)
 24. [ ] W23 gen image/video/3D model adapters (billing vs render failures, fallback chains) (req R1)
 25. [ ] W24 gen embeddings + audio + transcription handlers (input limits, URL fetch, partial bill (req R1)
 26. [ ] W25 gen durable objects (GenerationCoordinator, CommunityModelRateLimiter) (req R1)
 27. [ ] W26 shared/product-analytics, events, telemetry leakage + client-IP derived logic (req R1)
-28. [ ] W27 apps/pi-workbench, reimagine, virtual-makeup, map-to-isometric, changelog-gen, product (req R1)
+28. [ ] W27 apps/pi-workbench, reimagine, virtual-makeup, map-to-isometric, changelog-gen (req R1)
 29. [ ] W28 cross-cutting: prompt-injection / untrusted-content framing in agent pipelines (req R1)
 30. [ ] W29 cross-cutting: IDOR / missing ownership checks across D1 handlers (req R1)
 31. [ ] W30 cross-cutting: rate-limit/quota/amplification + resource exhaustion (non-cache classes (req R1)
-32. [ ] Finalize: ≥30 verified findings as issue1..issueN.md + wave TODO.md + engagement report +  (req R2,R3,R5)
-0/32 steps done
+32. [ ] Finalize: >=30 verified findings as issue1.md..issueN.md + wave TODO.md + engagement repor (req R2,R3,R5)
+1/32 steps done
 
 ## Contract status
 (no task contract on this job)

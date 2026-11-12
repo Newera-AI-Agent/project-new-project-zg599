@@ -67,3 +67,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T15:26:25.958Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF' import { describe, expect, it } fr
 - [2026-11-12T15:30:39.234Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== upstream shared/user-media-url.ts ====='; cat -n upstream/pollinations/s
 - [2026-11-12T15:34:11.319Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc-workers/ns0 && mv poc/ns0/d1hello.test.ts poc-workers/ns0/d1hello.test.
+- [2026-11-12T16:07:50.384Z | VM 2/3] ABORT (model endpoint failure) at step 53 — handoff written for resume.
