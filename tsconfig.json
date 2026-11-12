@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["upstream/pollinations/gen.pollinations.ai/src/*"],
+      "@shared/*": ["upstream/pollinations/shared/*"],
+      "@enter/*": ["upstream/pollinations/enter.pollinations.ai/src/*"]
+    }
+  },
+  "include": ["poc/**/*.ts", "harness/**/*.ts"]
+}
