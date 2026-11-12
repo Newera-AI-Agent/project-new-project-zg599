@@ -7,3 +7,5 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T10:16:11.014Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc evidence && cat > package.json <<'EOF' {   "name": "pollinations-redtea
 - [2026-11-12T10:18:02.946Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && git log --oneline 5c790c7..origin/main | wc -l; git diff --sta
 - [2026-11-12T10:23:57.014Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations && for i in $(seq 1 30); do if ! pgrep -f 'npm install --no-audit
+- [2026-11-12T10:25:12.433Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 600 npx vitest run test/client-ip.
+- [2026-11-12T10:25:23.447Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599/upstream/pollinations/gen.pollinations.ai && timeout 900 npx vitest run test/client-ip.
