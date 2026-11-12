@@ -65,3 +65,4 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T15:22:28.729Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== scripts ==='; ls -la scripts/; echo '=== run-poc.sh ==='; cat scripts/run-
 - [2026-11-12T15:24:06.709Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '=== verify.sh ==='; cat scripts/verify.sh; echo '=== new-issue.mjs ==='; cat s
 - [2026-11-12T15:26:25.958Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF' import { describe, expect, it } fr
+- [2026-11-12T15:30:39.234Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== upstream shared/user-media-url.ts ====='; cat -n upstream/pollinations/s
