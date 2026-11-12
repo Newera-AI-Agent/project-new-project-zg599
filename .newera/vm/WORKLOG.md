@@ -49,3 +49,7 @@ Durable session memory for this VM job chain. Each line is one step or wind-down
 - [2026-11-12T13:31:29.458Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf && cat > poc/ssrf/url-filter-bypass.test.ts << 'EOF'
 - [2026-11-12T13:35:37.479Z | VM 1/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && mkdir -p poc/ssrf evidence/ssrf findings research waves && cat > poc/ssrf/user-media
 - [2026-11-12T13:35:37.800Z | VM 1/3] RELAY checkpoint at step 172 — handoff committed, VM 2 continues.
+- [2026-11-12T13:36:24.045Z | VM 2/3] boot: VM 2/3 online (job vm-mwdlc1t4-ulx6tden, 240 min budget, relay continuation)
+- [2026-11-12T13:36:24.045Z | VM 2/3] self-check PASS: shell: VERIFIED (the harness executed bash on this VM at boot); node: v24.22.2; npm: 11.19.1; python3: Python 3.12.3; git: repo checked out @ cbc2b43; browser: Google Chrome 156.0.8078.79 available — the browser_* tools drive it (playwright-core installs on first browser call); filesystem: WRITABLE 
+- [2026-11-12T13:36:25.885Z | VM 2/3] boot auto-setup: npm install --no-audit --no-fund ok
+- [2026-11-12T13:37:00.906Z | VM 2/3] VERIFIED green: cd /home/runner/work/project-new-project-zg599/project-new-project-zg599 && echo '===== BRIEF.md =====' && cat BRIEF.md && echo && echo '===== TODO.md =====' &&
